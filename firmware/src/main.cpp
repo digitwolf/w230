@@ -1,12 +1,15 @@
 // main.cpp — W230 gear indicator (M5Stack Core / ESP32).
 //
 // Modes (cycle with button B):
-//   RUN   — big gear digit (N,1..5) from KDS + neutral switch.
+//   RUN   — big gear digit (N,1..5) from KDS + neutral switch, with a shift
+//           light (amber -> red -> flashing) driven by RPM.
 //   SCAN  — dump KDS registers 0x00..0x3F for W230 register discovery (docs/01).
-//   CAL   — guided ratio calibration: hold each gear, press A to capture.
+//   CAL   — guided ratio calibration: hold each gear, press A to capture. Bands
+//           are persisted to NVS and reloaded on boot.
 //
 // Button A: RUN=toggle RPM/speed overlay · CAL=capture band · SCAN=restart scan.
 #include <M5Unified.h>
+#include <Preferences.h>
 #include "pins.h"
 #include "kds.h"
 #include "kds_registers.h"
@@ -14,11 +17,46 @@
 
 KDS kds(Serial2, KDS_RX_PIN, KDS_TX_PIN);
 GearEstimator estimator;
+Preferences prefs;   // NVS storage for calibrated ratio bands
 
 enum Mode { RUN, SCAN, CAL };
 Mode mode = RUN;
 bool showOverlay = true;
 int  calTargetGear = 1;
+
+// ---- shift light ----
+// W230 makes peak power at 7,500 rpm; redline is a little above. Warn amber
+// approaching, red at the shift point, and flash the border past it. Tune to
+// taste (and lower for a short-shifting economy style).
+static const float SHIFT_WARN_RPM  = 6800.0f;   // amber bar
+static const float SHIFT_RPM       = 7800.0f;   // red — time to shift
+static const float SHIFT_FLASH_RPM = 8600.0f;   // flashing red border
+static bool  flashOn = false;
+static uint32_t lastFlash = 0;
+
+// Default ratio bands (unitless rpm/speed). Placeholders until CAL overrides
+// them; also the fallback when NVS is empty.
+static const float DEFAULT_BANDS[NUM_GEARS] = {240.0f, 165.0f, 125.0f, 100.0f, 82.0f};
+
+// ---- calibration persistence (NVS) ----
+static void loadBands() {
+  prefs.begin("gear", /*readOnly=*/true);
+  for (int g = 1; g <= NUM_GEARS; g++) {
+    char key[4]; snprintf(key, sizeof(key), "b%d", g);
+    estimator.setBand(g, prefs.getFloat(key, DEFAULT_BANDS[g - 1]));
+  }
+  prefs.end();
+}
+
+static void saveBands() {
+  prefs.begin("gear", /*readOnly=*/false);
+  for (int g = 1; g <= NUM_GEARS; g++) {
+    char key[4]; snprintf(key, sizeof(key), "b%d", g);
+    float v = estimator.band(g);
+    if (!isnan(v)) prefs.putFloat(key, v);
+  }
+  prefs.end();
+}
 
 // ---- optional analog taps (interrupt pulse counting) ----
 volatile uint32_t rpmPulses = 0, vssPulses = 0;
@@ -64,6 +102,25 @@ static void drawGear(int g, float rpm, float speed, bool connected) {
              isnan(rpm) ? 0.f : rpm, isnan(speed) ? 0.f : speed);
     d.drawString(o, 4, d.height() - 4);
   }
+
+  // shift light: coloured border once RPM enters the warn/shift/flash zones.
+  if (!isnan(rpm) && rpm >= SHIFT_WARN_RPM) {
+    uint16_t col;
+    bool draw = true;
+    if (rpm >= SHIFT_FLASH_RPM) {
+      if (millis() - lastFlash > 80) { flashOn = !flashOn; lastFlash = millis(); }
+      col = TFT_RED; draw = flashOn;                 // urgent: flashing red
+    } else if (rpm >= SHIFT_RPM) {
+      col = TFT_RED; flashOn = false;                // shift now: solid red
+    } else {
+      col = TFT_ORANGE; flashOn = false;             // approaching: amber
+    }
+    if (draw)
+      for (int t = 0; t < 6; t++)
+        d.drawRect(t, t, d.width() - 2 * t, d.height() - 2 * t, col);
+  } else {
+    flashOn = false;
+  }
   d.endWrite();
 }
 
@@ -101,13 +158,9 @@ void setup() {
     attachInterrupt(VSS_TAP_PIN, onVssPulse, RISING);
   }
 
-  // Reasonable default ratio bands (unitless rpm/speed). REPLACE via CAL mode
-  // once you know the W230's real numbers. These just give a working start.
-  estimator.setBand(1, 240.0f);
-  estimator.setBand(2, 165.0f);
-  estimator.setBand(3, 125.0f);
-  estimator.setBand(4, 100.0f);
-  estimator.setBand(5, 82.0f);
+  // Load calibrated ratio bands from NVS (falls back to DEFAULT_BANDS if unset).
+  // Replace them any time via CAL mode; captures are persisted automatically.
+  loadBands();
 
   M5.Display.setFont(&fonts::Font2);
   M5.Display.drawString("Connecting KDS...", 10, 10);
@@ -177,6 +230,7 @@ void loop() {
 
     if (M5.BtnA.wasPressed() && !isnan(ratio)) {
       estimator.setBand(calTargetGear, ratio);
+      saveBands();                       // persist to NVS immediately
       calTargetGear++;
       if (calTargetGear > NUM_GEARS) { calTargetGear = 1; mode = RUN; }
     }

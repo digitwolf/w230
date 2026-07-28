@@ -29,9 +29,17 @@ gear register — the same K-line RPM+speed data drives the fallback.
 
 | Mode | Purpose | Button A |
 |------|---------|----------|
-| **RUN** | Big gear digit (N,1–5) + optional rpm/speed overlay | toggle overlay |
+| **RUN** | Big gear digit (N,1–5) + shift light + optional rpm/speed overlay | toggle overlay |
 | **SCAN** | Dump registers `0x00–0x3F` to screen for W230 discovery | rescan |
-| **CAL** | Guided ratio calibration — hold each gear, capture | capture band |
+| **CAL** | Guided ratio calibration — hold each gear, capture (saved to NVS) | capture band |
+
+### Shift light (RUN mode)
+
+A coloured screen border is driven by RPM: **amber** approaching, **solid red**
+at the shift point, **flashing red** past it. Thresholds live at the top of
+`main.cpp` (`SHIFT_WARN_RPM` / `SHIFT_RPM` / `SHIFT_FLASH_RPM`) — the W230 peaks
+at 7,500 rpm, so the defaults warn ~6,800 and call the shift ~7,800. Lower them
+for a short-shifting economy style.
 
 ## Bring-up sequence
 
@@ -54,20 +62,13 @@ gear register — the same K-line RPM+speed data drives the fallback.
 > `REG_SPEED` decodes to km/h or mph — you just have to calibrate in whatever
 > unit the register reports. The defaults in `setup()` are placeholders.
 
-## Persisting calibration (recommended enhancement)
+## Persisting calibration (NVS)
 
-The reference build keeps bands in RAM. For a finished unit, store them in NVS so
-they survive power cycles:
-
-```cpp
-#include <Preferences.h>
-Preferences prefs;
-// save:  prefs.begin("gear"); prefs.putFloat("b1", estimator.band(1)); ...
-// load:  estimator.setBand(1, prefs.getFloat("b1", 240.0f)); ...
-```
-
-Call load in `setup()` and save at the end of CAL. (Left as a small addition so
-the core logic stays readable.)
+Calibrated ratio bands are stored in ESP32 **NVS** (`Preferences`, namespace
+`gear`, keys `b1..b5`). `loadBands()` runs in `setup()` — falling back to
+`DEFAULT_BANDS` when a key is unset — and each CAL capture calls `saveBands()`,
+so calibration survives power cycles. Delete the namespace (or re-run CAL) to
+recalibrate.
 
 ## Build & flash
 
