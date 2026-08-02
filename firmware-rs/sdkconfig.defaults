@@ -1,0 +1,4 @@
+# Smaller stack usage + stable logging for the gear indicator
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+CONFIG_FREERTOS_HZ=1000
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
