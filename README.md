@@ -18,13 +18,24 @@ switch when the diagnostic stream is unavailable.
 |-----|----------|
 | [`docs/01-research-diagnostic-port.md`](docs/01-research-diagnostic-port.md) | W230 electronics, KDS port, K-line/KWP2000 protocol, register map |
 | [`docs/02-hardware-design.md`](docs/02-hardware-design.md) | Block diagram, schematic, BOM, power, K-line transceiver, enclosure |
-| [`docs/03-firmware.md`](docs/03-firmware.md) | Firmware architecture, gear-decode strategy, calibration, build/flash |
+| [`docs/03-firmware.md`](docs/03-firmware.md) | C++ firmware architecture, gear-decode strategy, calibration, build/flash |
+| [`docs/04-firmware-rust.md`](docs/04-firmware-rust.md) | **Rust firmware** for ATOM Matrix + LINTTL3 (TJA1021) module |
 | [`hardware/wiring.md`](hardware/wiring.md) | Connector pinouts and wiring harness |
 
 ## Firmware
 
-PlatformIO project under [`firmware/`](firmware/). Target: M5Stack Core
-(ESP32). See [`docs/03-firmware.md`](docs/03-firmware.md) to build and flash.
+Two implementations:
+
+- **Rust (current direction):** [`firmware-rs/`](firmware-rs/) — targets the
+  **M5Stack ATOM Matrix**; the 5×5 LED matrix is the gear display. K-line via a
+  **LINTTL3 (TJA1021/SIT1021T)** TTL↔LIN module. Hex-logs all K-line traffic.
+  See [`docs/04-firmware-rust.md`](docs/04-firmware-rust.md).
+- **C++ / PlatformIO:** [`firmware/`](firmware/) — targets M5Stack Core (LCD),
+  includes SCAN register-discovery and CAL modes.
+  See [`docs/03-firmware.md`](docs/03-firmware.md).
+
+> Note: the L9637D referenced in docs/02 is now EOL — the LINTTL3/TJA1021
+> module in docs/04 is the current recommended K-line front end.
 
 ## Status / safety
 

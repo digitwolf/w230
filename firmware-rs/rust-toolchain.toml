@@ -1,0 +1,4 @@
+# The original ATOM Matrix is an ESP32-PICO-D4 (Xtensa) — requires the esp
+# toolchain channel installed via `espup install`.
+[toolchain]
+channel = "esp"
