@@ -1,8 +1,7 @@
 //! 5x5 RGB matrix rendering for the M5Stack ATOM Matrix (25x WS2812, GPIO27).
 //!
 //! The whole matrix is the gear digit: N (green), 1-5 (cyan), dash (dim red)
-//! for unknown. The top-left pixel is overridden as a status dot when the
-//! K-line link is down.
+//! for unknown. When the K-line link is down the whole matrix goes red.
 
 use crate::gear::Gear;
 use smart_leds::RGB8;
@@ -14,6 +13,7 @@ const GLYPH_2: [u8; 5] = [0b01110, 0b00010, 0b01110, 0b01000, 0b01110];
 const GLYPH_3: [u8; 5] = [0b01110, 0b00010, 0b00110, 0b00010, 0b01110];
 const GLYPH_4: [u8; 5] = [0b01010, 0b01010, 0b01110, 0b00010, 0b00010];
 const GLYPH_5: [u8; 5] = [0b01110, 0b01000, 0b01110, 0b00010, 0b01110];
+const GLYPH_6: [u8; 5] = [0b01110, 0b01000, 0b01110, 0b01010, 0b01110];
 const GLYPH_DASH: [u8; 5] = [0b00000, 0b00000, 0b01110, 0b00000, 0b00000];
 
 const GREEN: RGB8 = RGB8::new(0, 255, 40);
@@ -25,6 +25,10 @@ const OFF: RGB8 = RGB8::new(0, 0, 0);
 /// Render the gear into a 25-pixel row-major frame buffer.
 /// `brightness` scales 0..=255. `link_up` = K-line connected.
 pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
+    if !link_up {
+        return [scale(STATUS_RED, brightness); 25]; // NO-LINK: all red
+    }
+
     let (glyph, colour) = match gear {
         Gear::Neutral => (&GLYPH_N, GREEN),
         Gear::G(1) => (&GLYPH_1, CYAN),
@@ -32,6 +36,7 @@ pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
         Gear::G(3) => (&GLYPH_3, CYAN),
         Gear::G(4) => (&GLYPH_4, CYAN),
         Gear::G(5) => (&GLYPH_5, CYAN),
+        Gear::G(6) => (&GLYPH_6, CYAN),
         _ => (&GLYPH_DASH, DIM_RED),
     };
 
@@ -42,9 +47,6 @@ pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
                 px[row * 5 + col] = scale(colour, brightness);
             }
         }
-    }
-    if !link_up {
-        px[0] = scale(STATUS_RED, brightness); // top-left: NO-LINK dot
     }
     px
 }

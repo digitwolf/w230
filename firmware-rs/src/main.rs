@@ -2,7 +2,11 @@
 //!
 //! Reads the KDS diagnostic K-line through a LINTTL3 (TJA1021/SIT1021T)
 //! TTL-UART<->LIN module and shows the current gear on the 5x5 LED matrix:
-//! green N, cyan 1-5, dim red dash when unknown, red top-left dot = no link.
+//! green N, cyan 1-6, dim red dash when unknown, all red = no link.
+//! The ECU exposes no gear or neutral register, so N comes from the bike's
+//! neutral-switch wire on G19 (required) and gears 1-6 from the RPM/speed
+//! ratio. ECU reg 0x03 is the clutch switch — it pauses ratio classification
+//! while the lever is pulled.
 //!
 //! Wiring (module pins per vendor sheet — note TX/RX are named from the
 //! MODULE's perspective, so they cross over to the ESP32):
@@ -17,14 +21,18 @@
 mod display;
 mod gear;
 mod kds;
+mod learn;
+mod web;
 
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{PinDriver, Pull};
-use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::uart::{config::Config as UartConfig, UartDriver};
-use gear::{GearEstimator, DEFAULT_BANDS};
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
+use gear::GearEstimator;
 use kds::Kds;
+use learn::RatioLearner;
 use log::{info, warn};
 use smart_leds::SmartLedsWrite;
 use std::time::{Duration, Instant};
@@ -33,6 +41,21 @@ use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
 const BRIGHTNESS_STEPS: [u8; 3] = [40, 120, 255];
+const LEARN_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Button hold this long = wipe the learned calibration.
+const LEARN_RESET_HOLD: Duration = Duration::from_secs(3);
+
+/// Gear-register hunt: scan all local identifiers once after connecting, then
+/// keep re-reading the supported ones and log every value change. Shift
+/// through the gears and watch which register follows. (Used 2026-08-02 to
+/// find the clutch switch in reg 0x03; no gear-number register exists.)
+const DIAG_SCAN: bool = false;
+
+/// Deep scan: probe services 0x1A (ECU identification) and 0x22 (common
+/// identifiers 0x0000-0x0FFF, ~10 min), then change-watch everything found.
+/// (Run 2026-08-02: service 0x22 absent entirely; 0x1A yields ID strings only
+/// — confirmed no neutral/gear data exists beyond the 59 0x21 registers.)
+const DEEP_SCAN: bool = false;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -56,81 +79,212 @@ fn main() -> anyhow::Result<()> {
     slp.set_high()?;
     info!("TJA1021 SLP driven high (normal mode)");
 
-    // --- K-line UART pins (Grove port): G26 = ESP32 TX, G32 = ESP32 RX ---
-    let mut uart1 = p.uart1;
-    let mut tx_pin = p.pins.gpio26;
-    let mut rx_pin = p.pins.gpio32;
+    // --- K-line UART (Grove port): G26 = ESP32 TX, G32 = ESP32 RX ---
+    // The UART owns the pins for good; the ISO-14230 fast-init low pulse is
+    // generated inside Kds by a temporary baud-rate drop, so the request can
+    // follow the wake pattern with no driver-setup delay.
+    let uart = UartDriver::new(
+        p.uart1,
+        p.pins.gpio26,
+        p.pins.gpio32,
+        Option::<esp_idf_hal::gpio::Gpio0>::None,
+        Option::<esp_idf_hal::gpio::Gpio0>::None,
+        &UartConfig::new().baudrate(Hertz(10_400)),
+    )?;
+    let mut kds = Kds::new(uart);
 
-    let mut estimator = GearEstimator::new(DEFAULT_BANDS);
-    let mut kds_link: Option<Kds> = None;
+    // --- Self-learning ratio calibration, persisted in NVS ---
+    let nvs_part = EspDefaultNvsPartition::take()?;
+    learn::self_test(nvs_part.clone()); // end-to-end pipeline check, own namespace
+    let nvs = EspNvs::new(nvs_part.clone(), "gearlearn", true)?;
+    let mut learner = RatioLearner::new(nvs);
+    learner.dump(); // post-ride diagnostic: full histogram in the boot log
+
+    // --- WiFi hotspot + HTTP diagnostic dashboard ---
+    let sysloop = EspSystemEventLoop::take()?;
+    let webdiag = web::start(p.modem, sysloop, nvs_part)?;
+
+    let mut estimator = GearEstimator::new();
+    if let Some(bands) = learner.derive_bands() {
+        estimator.set_bands(bands);
+    }
+
     let mut last_reconnect = Instant::now() - RECONNECT_INTERVAL;
+    let mut last_learn_save = Instant::now();
+    let mut diag_regs: Option<Vec<(u8, Vec<u8>)>> = None;
+    let mut deep_watch: Option<Vec<(u16, Vec<u8>)>> = None;
     let mut brightness_idx: usize = 1;
     let mut button_was_down = false;
+    let mut button_down_at = Instant::now();
 
     loop {
-        // Button: cycle brightness on press.
+        // Button: short press cycles brightness, 3s hold wipes calibration.
         let down = button.is_low();
         if down && !button_was_down {
-            brightness_idx = (brightness_idx + 1) % BRIGHTNESS_STEPS.len();
-            info!("brightness -> {}", BRIGHTNESS_STEPS[brightness_idx]);
+            button_down_at = Instant::now();
+        }
+        if !down && button_was_down {
+            if button_down_at.elapsed() >= LEARN_RESET_HOLD {
+                learner.clear();
+                estimator.clear_bands();
+                info!("LEARN: calibration wiped (button hold)");
+            } else {
+                brightness_idx = (brightness_idx + 1) % BRIGHTNESS_STEPS.len();
+                info!("brightness -> {}", BRIGHTNESS_STEPS[brightness_idx]);
+            }
         }
         button_was_down = down;
 
         // (Re)connect: ISO-14230 fast init, then startCommunication.
-        if kds_link.is_none() && last_reconnect.elapsed() >= RECONNECT_INTERVAL {
+        if !kds.connected && last_reconnect.elapsed() >= RECONNECT_INTERVAL {
             last_reconnect = Instant::now();
-            drop(kds_link.take()); // release UART pins before bit-banging TX
-
-            info!("KDS: fast-init pulse (300ms high, 25ms low, 25ms high)");
-            {
-                let mut tx = PinDriver::output(unsafe { tx_pin.clone_unchecked() })?;
-                tx.set_high()?;
-                FreeRtos::delay_ms(300);
-                tx.set_low()?;
-                FreeRtos::delay_ms(25);
-                tx.set_high()?;
-                FreeRtos::delay_ms(25);
-            } // drop PinDriver so the UART can claim the pin
-
-            let uart = UartDriver::new(
-                unsafe { uart1.clone_unchecked() },
-                unsafe { tx_pin.clone_unchecked() },
-                unsafe { rx_pin.clone_unchecked() },
-                Option::<esp_idf_hal::gpio::Gpio0>::None,
-                Option::<esp_idf_hal::gpio::Gpio0>::None,
-                &UartConfig::new().baudrate(Hertz(10_400)),
-            )?;
-            let mut link = Kds::new(uart);
-            if link.start_communication() {
-                kds_link = Some(link);
-            } else {
+            if !kds.start_communication() {
                 warn!("KDS: init failed, retrying in {RECONNECT_INTERVAL:?}");
             }
         }
 
-        // Poll live data.
-        let (mut rpm, mut speed, mut gear_reg) = (None, None, None);
-        let mut link_up = false;
-        if let Some(link) = kds_link.as_mut() {
-            rpm = link.read_rpm();
-            speed = link.read_speed();
-            gear_reg = link.read_gear_raw();
-            // Losing all three in one cycle = link is dead; force re-init.
-            if rpm.is_none() && speed.is_none() && gear_reg.is_none() {
-                warn!("KDS: no data — dropping link for re-init");
-                kds_link = None;
-            } else {
-                link_up = true;
+        // Deep scan: identification records + 16-bit common identifiers, then
+        // change-watch the found commons (shift gears and look for a flip).
+        if kds.connected && DEEP_SCAN {
+            match deep_watch.as_mut() {
+                None => {
+                    info!("DEEP: scanning ECU identification 00..FF (service 1A)...");
+                    for id in 0x00..=0xFFu8 {
+                        if let Some(d) = kds.read_ident(id) {
+                            info!("DEEP: ident {id:02X} = {d:02X?}");
+                        }
+                        if !kds.connected {
+                            break;
+                        }
+                    }
+                    info!("DEEP: scanning common ids 0000..0FFF (service 22, ~10 min)...");
+                    let mut found: Vec<(u16, Vec<u8>)> = Vec::new();
+                    for id in 0x0000..=0x0FFFu16 {
+                        if let Some(d) = kds.read_common(id, true) {
+                            info!("DEEP: common {id:04X} = {d:02X?}");
+                            found.push((id, d));
+                        }
+                        if id & 0xFF == 0xFF {
+                            info!("DEEP: ... {id:04X}/0FFF");
+                        }
+                        if !kds.connected {
+                            break;
+                        }
+                    }
+                    info!(
+                        "DEEP: scan done, {} common ids — now shift N<->1st and watch for changes",
+                        found.len()
+                    );
+                    deep_watch = Some(found);
+                }
+                Some(table) => {
+                    for (id, prev) in table.iter_mut() {
+                        if let Some(now) = kds.read_common(*id, true) {
+                            if now != *prev {
+                                info!("DEEP: common {id:04X} CHANGED {prev:02X?} -> {now:02X?}");
+                                *prev = now;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Neutral switch: LOW = neutral.
+        // Poll live data.
+        let (mut rpm, mut speed, gear_reg) = (None, None, None);
+        let mut link_up = false;
+        if kds.connected && DIAG_SCAN {
+            match diag_regs.as_mut() {
+                None => {
+                    info!("KDS diag: scanning local identifiers 00..FF (takes ~30s)...");
+                    let table = kds.scan_registers();
+                    info!("KDS diag: scan done, {} registers supported — now shift through the gears and watch for changes", table.len());
+                    diag_regs = Some(table);
+                    link_up = true;
+                }
+                Some(table) => {
+                    let mut alive = false;
+                    for (reg, prev) in table.iter_mut() {
+                        if let Some(now) = kds.read_register(*reg) {
+                            alive = true;
+                            if now != *prev {
+                                info!("KDS diag: reg {reg:02X} CHANGED {prev:02X?} -> {now:02X?}");
+                                *prev = now;
+                            }
+                        }
+                    }
+                    if !alive {
+                        warn!("KDS: no data — dropping link for re-init");
+                        kds.connected = false;
+                    }
+                    link_up = kds.connected;
+                }
+            }
+        }
+
+        let mut clutch = None;
+        if kds.connected && !DIAG_SCAN {
+            rpm = kds.read_rpm();
+            speed = kds.read_speed();
+            clutch = kds.read_clutch();
+            // Losing all three in one cycle = link is dead; force re-init.
+            if rpm.is_none() && speed.is_none() && clutch.is_none() {
+                warn!("KDS: no data — dropping link for re-init");
+                kds.connected = false;
+                learner.save(); // key-off is how rides end — don't lose the tail
+            } else {
+                link_up = true;
+                if let (Some(r), Some(s)) = (rpm, speed) {
+                    // Unknown clutch counts as pulled: never learn from it.
+                    learner.add_sample(r, s, clutch.unwrap_or(true));
+                }
+            }
+        }
+
+        // Periodically persist the histogram and re-derive the bands, so a
+        // calibration ride completes without any power cycle. Only re-derive
+        // when new data was actually written — keeps the bench log quiet.
+        if last_learn_save.elapsed() >= LEARN_SAVE_INTERVAL {
+            last_learn_save = Instant::now();
+            if learner.save() {
+                if let Some(bands) = learner.derive_bands() {
+                    estimator.set_bands(bands);
+                }
+            }
+        }
+
+        // Neutral switch on G19: LOW = neutral.
         let neutral_active = neutral.is_low();
 
-        let gear = estimator.update(rpm, speed, gear_reg, neutral_active);
+        let gear = estimator.update(
+            rpm,
+            speed,
+            gear_reg,
+            neutral_active,
+            clutch.unwrap_or(false),
+        );
         let frame = display::render(gear, link_up, BRIGHTNESS_STEPS[brightness_idx]);
         if let Err(e) = leds.write(frame.into_iter()) {
             warn!("LED write failed: {e}");
+        }
+
+        // Publish to the WiFi dashboard; act on a requested calibration wipe.
+        if webdiag.clear_req.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            learner.clear();
+            estimator.clear_bands();
+            info!("LEARN: calibration wiped (web request)");
+        }
+        {
+            let mut s = webdiag.shared.lock().unwrap();
+            s.link_up = link_up;
+            s.gear = Some(gear);
+            s.rpm = rpm;
+            s.speed = speed;
+            s.clutch = clutch;
+            s.samples = learner.samples();
+            s.bands = estimator.bands();
+            s.hist.clear();
+            s.hist.extend_from_slice(learner.hist());
         }
 
         FreeRtos::delay_ms(POLL_INTERVAL.as_millis() as u32);

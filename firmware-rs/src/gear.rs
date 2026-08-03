@@ -1,44 +1,58 @@
 //! Gear determination with three prioritised sources:
-//!   1. Neutral switch  -> definitive "N".
-//!   2. Direct KDS gear register (if the W230 exposes one).
-//!   3. RPM/speed ratio classifier with per-gear bands.
+//!   1. Hardware neutral switch (GPIO19) -> definitive "N".
+//!   2. Direct KDS gear register (the W230 has none — kept for other models).
+//!   3. RPM/speed ratio classifier with per-gear bands, gated by the clutch
+//!      switch (ECU reg 0x03): with the lever pulled the engine is decoupled,
+//!      so the ratio is meaningless and classification pauses.
 //!
 //! `Gear::Unknown` renders as a dash on the matrix.
 
 use log::info;
 
-pub const NUM_GEARS: usize = 5; // W230 is a 5-speed
+pub const NUM_GEARS: usize = 6; // W230 is a 6-speed
 
 const MIN_SPEED: f32 = 3.0; // below this the ratio is meaningless
 const MIN_RPM: f32 = 600.0;
 const DEBOUNCE_N: u8 = 3; // consecutive samples before committing
 const BAND_TOL: f32 = 0.14; // ±14% window around a band centre
 
-/// Default ratio bands (unitless rpm/speed) — placeholders until calibrated.
-pub const DEFAULT_BANDS: [f32; NUM_GEARS] = [240.0, 165.0, 125.0, 100.0, 82.0];
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Gear {
     Unknown,
     Neutral,
-    G(u8), // 1..=5
+    G(u8), // 1..=6
 }
 
 pub struct GearEstimator {
-    pub bands: [f32; NUM_GEARS],
+    /// Learned ratio bands; `None` until a calibration ride has covered all
+    /// gears — the classifier stays silent rather than guess from placeholders.
+    bands: Option<[f32; NUM_GEARS]>,
     gear: Gear,
     candidate: Gear,
     stable: u8,
 }
 
 impl GearEstimator {
-    pub fn new(bands: [f32; NUM_GEARS]) -> Self {
+    pub fn new() -> Self {
         Self {
-            bands,
+            bands: None,
             gear: Gear::Unknown,
             candidate: Gear::Unknown,
             stable: 0,
         }
+    }
+
+    pub fn set_bands(&mut self, bands: [f32; NUM_GEARS]) {
+        self.bands = Some(bands);
+    }
+
+    pub fn clear_bands(&mut self) {
+        self.bands = None;
+    }
+
+    pub fn bands(&self) -> Option<[f32; NUM_GEARS]> {
+        self.bands
     }
 
     /// Feed the latest sample; returns the debounced gear.
@@ -48,6 +62,7 @@ impl GearEstimator {
         speed: Option<f32>,
         gear_reg: Option<u8>,
         neutral_switch: bool,
+        clutch_pulled: bool,
     ) -> Gear {
         let raw = if neutral_switch {
             // 1) Hardware neutral switch wins outright.
@@ -59,6 +74,9 @@ impl GearEstimator {
             } else {
                 Gear::G(g)
             }
+        } else if clutch_pulled {
+            // Engine decoupled — the ratio says nothing; hold the last gear.
+            Gear::Unknown
         } else {
             // 3) Ratio fallback.
             self.classify(rpm, speed)
@@ -71,7 +89,13 @@ impl GearEstimator {
             self.candidate = raw;
             self.stable = 1;
         }
-        if self.stable >= DEBOUNCE_N && self.candidate != Gear::Unknown {
+        // Unknown normally never displaces a known gear (coasting clutch-in
+        // mid-ride shouldn't blank the digit) — EXCEPT a held "N": once the
+        // neutral source definitively reads in-gear, keeping N on the display
+        // would tell the rider it's safe to drop the clutch when it isn't.
+        let commit = self.candidate != Gear::Unknown
+            || (self.gear == Gear::Neutral && !neutral_switch);
+        if self.stable >= DEBOUNCE_N && commit {
             if self.gear != self.candidate {
                 info!("GEAR: {:?} -> {:?}", self.gear, self.candidate);
             }
@@ -81,13 +105,16 @@ impl GearEstimator {
     }
 
     fn classify(&self, rpm: Option<f32>, speed: Option<f32>) -> Gear {
+        let Some(bands) = &self.bands else {
+            return Gear::Unknown; // not calibrated yet
+        };
         let (rpm, speed) = match (rpm, speed) {
             (Some(r), Some(s)) if r >= MIN_RPM && s >= MIN_SPEED => (r, s),
             _ => return Gear::Unknown,
         };
         let ratio = rpm / speed;
         let mut best: Option<(usize, f32)> = None;
-        for (i, c) in self.bands.iter().enumerate() {
+        for (i, c) in bands.iter().enumerate() {
             let err = (ratio - c).abs() / c;
             if best.map_or(true, |(_, be)| err < be) {
                 best = Some((i, err));
