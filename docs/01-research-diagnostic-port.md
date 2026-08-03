@@ -145,6 +145,36 @@ This is exactly how commercial indicators (Healtech GIpro, SmartGT) work.
 Because the W230 is a 5-speed, there are only five bands to separate — easy and
 robust.
 
+## 6. Sibling evidence: the KLX230 (same 233 cc platform)
+
+The KLX230/KLX230R/KLX230S share the W230's 233 cc air-cooled FI single, so its
+better-documented diagnostics are the best proxy we have. Findings:
+
+**a) HealTech sells the KLX230 only the X-Type (analog) gear indicator, not the
+DS (diagnostic-plug) model.** HealTech maintains per-model KDS support and
+chose *not* to offer the plug-in DS unit for this platform. Their GPX-K04
+KLX230 kit instead taps four signals: **switched 12 V, ground, the speed-sensor
+signal (inline at the speed-sensor connector), and an RPM signal** (coil /
+CKP / tach wire), then self-learns the ratio bands. Interpretation: the 230
+ECU does not serve a usable gear value over the diagnostic port — consistent
+with the platform having no gear-position sensor. It does **not** prove the
+port has no live data at all (DS needs a *gear* value specifically).
+
+**b) The 230 platform definitely has blink-code self-diagnosis.** Grounding the
+self-diagnosis terminal ≥2 s makes the FI lamp blink service codes (dealer mode
+1). This confirms one line of the 4-pin connector is the classic Kawasaki
+**self-diag ground line** — do not confuse it with the K-line during probing.
+KLX230 code 24 = speed sensor, confirming an **electronic VSS exists** on this
+platform (good news for the analog fallback path).
+
+**c) Design consequence for the W230 module.** Treat K-line live data as
+*possible but unproven* on this platform: attempt KWP2000 fast-init and the
+register SCAN first (RPM may well be served), but expect the production path to
+be the GPX-K04-style analog taps — RPM + VSS + neutral switch — feeding the
+ratio classifier. That is exactly the fallback already designed in §5, and the
+GPX-K04 harness points to the cleanest tap points: the **speed-sensor
+connector** (inline) and a **coil/tach wire**.
+
 ## Sources
 
 - [Kawasaki W230 — Wikipedia](https://en.wikipedia.org/wiki/Kawasaki_W230)
@@ -155,3 +185,7 @@ robust.
 - [KDS2Bluetooth — KDS reader & PID list](https://github.com/HerrRiebmann/KDS2Bluetooth)
 - [aster94/Keyword-Protocol-2000 — KWP2000/ISO-14230 library](https://github.com/aster94/Keyword-Protocol-2000)
 - [Eztys/KDS — K-line library for Kawasaki](https://github.com/Eztys/KDS)
+- [GIpro X-Type GPX-K04 kit for KLX230 — MotoRacingShop](https://www.motoracingshop.com/en/healtech-gear-indicator-gipro-x-for-kawasaki-klx-230-2022-with-bike-specific-cable-model-gpx-k04.html)
+- [GIpro X-type user guide — wiring: power, ground, speed, RPM (PDF)](https://www.healtech-electronics.com/docs/GPX_UsersGuide_en.pdf)
+- [KLX230 FI blink-code self-diagnosis — KawiForums how-to](https://www.kawiforums.com/threads/how-to-pull-fi-codes.134059/)
+- [Kawasaki KDS protocol reverse-engineering — openecu.org](http://forums.openecu.org/viewtopic.php?f=19&t=5888)
