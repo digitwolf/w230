@@ -32,7 +32,7 @@ pub const SVC_READ_IDENT_OK: u8 = 0x5A; // positive response
 
 // Local identifiers (registers) — verified live on a 2024 W230 (2026-08-02):
 // a full 0x00-0xFF scan found no gear-number and no neutral register (0x0B
-// answers 7F/12; neutral must come from the switch wire on GPIO19). 0x03
+// answers 7F/12; neutral must come from the switch wire on GPIO23). 0x03
 // initially looked like a neutral flag but a clutch-hold test proved it is
 // the CLUTCH switch. 0x0A is battery volts, 0x04-0x08 look like sensor temps.
 pub const REG_RPM: u8 = 0x09; // 2 bytes: hi*100 + lo

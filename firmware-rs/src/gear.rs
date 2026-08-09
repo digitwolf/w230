@@ -1,5 +1,5 @@
 //! Gear determination with three prioritised sources:
-//!   1. Hardware neutral switch (GPIO19) -> definitive "N".
+//!   1. Hardware neutral switch (GPIO23) -> definitive "N".
 //!   2. Direct KDS gear register (the W230 has none — kept for other models).
 //!   3. RPM/speed ratio classifier with per-gear bands, gated by the clutch
 //!      switch (ECU reg 0x03): with the lever pulled the engine is decoupled,
@@ -64,10 +64,26 @@ impl GearEstimator {
         neutral_switch: bool,
         clutch_pulled: bool,
     ) -> Gear {
-        let raw = if neutral_switch {
-            // 1) Hardware neutral switch wins outright.
-            Gear::Neutral
-        } else if let Some(g) = gear_reg.filter(|g| *g as usize <= NUM_GEARS) {
+        // The hardware neutral switch is definitive — no debounce in either
+        // direction. Entering N: show it now. Leaving N: drop it now (holding
+        // a stale N invites dropping the clutch in gear).
+        if neutral_switch {
+            if self.gear != Gear::Neutral {
+                info!("GEAR: {:?} -> Neutral (switch)", self.gear);
+            }
+            self.gear = Gear::Neutral;
+            self.candidate = Gear::Neutral;
+            self.stable = DEBOUNCE_N;
+            return self.gear;
+        }
+        if self.gear == Gear::Neutral {
+            info!("GEAR: Neutral -> Unknown (switch released)");
+            self.gear = Gear::Unknown;
+            self.candidate = Gear::Unknown;
+            self.stable = 1;
+        }
+
+        let raw = if let Some(g) = gear_reg.filter(|g| *g as usize <= NUM_GEARS) {
             // 2) Plausible KDS gear register (0 = neutral per ECU map).
             if g == 0 {
                 Gear::Neutral
@@ -89,13 +105,10 @@ impl GearEstimator {
             self.candidate = raw;
             self.stable = 1;
         }
-        // Unknown normally never displaces a known gear (coasting clutch-in
-        // mid-ride shouldn't blank the digit) — EXCEPT a held "N": once the
-        // neutral source definitively reads in-gear, keeping N on the display
-        // would tell the rider it's safe to drop the clutch when it isn't.
-        let commit = self.candidate != Gear::Unknown
-            || (self.gear == Gear::Neutral && !neutral_switch);
-        if self.stable >= DEBOUNCE_N && commit {
+        // Unknown never displaces a known gear here (coasting clutch-in
+        // mid-ride shouldn't blank the digit); stale "N" is impossible — the
+        // switch path above commits and drops N without debounce.
+        if self.stable >= DEBOUNCE_N && self.candidate != Gear::Unknown {
             if self.gear != self.candidate {
                 info!("GEAR: {:?} -> {:?}", self.gear, self.candidate);
             }

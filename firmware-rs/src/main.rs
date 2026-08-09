@@ -4,7 +4,7 @@
 //! TTL-UART<->LIN module and shows the current gear on the 5x5 LED matrix:
 //! green N, cyan 1-6, dim red dash when unknown, all red = no link.
 //! The ECU exposes no gear or neutral register, so N comes from the bike's
-//! neutral-switch wire on G19 (required) and gears 1-6 from the RPM/speed
+//! neutral-switch wire on G23 (required) and gears 1-6 from the RPM/speed
 //! ratio. ECU reg 0x03 is the clutch switch — it pauses ratio classification
 //! while the lever is pulled.
 //!
@@ -30,7 +30,7 @@ use esp_idf_hal::prelude::*;
 use esp_idf_hal::uart::{config::Config as UartConfig, UartDriver};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
-use gear::GearEstimator;
+use gear::{Gear, GearEstimator};
 use kds::Kds;
 use learn::RatioLearner;
 use log::{info, warn};
@@ -51,6 +51,11 @@ const LEARN_RESET_HOLD: Duration = Duration::from_secs(3);
 /// find the clutch switch in reg 0x03; no gear-number register exists.)
 const DIAG_SCAN: bool = false;
 
+/// Demo mode: override the display with gears 1..6, stepping every
+/// `DEMO_STEP`. TEMPORARY — turn off for real use.
+const DEMO_MODE: bool = false;
+const DEMO_STEP: Duration = Duration::from_secs(15);
+
 /// Deep scan: probe services 0x1A (ECU identification) and 0x22 (common
 /// identifiers 0x0000-0x0FFF, ~10 min), then change-watch everything found.
 /// (Run 2026-08-02: service 0x22 absent entirely; 0x1A yields ID strings only
@@ -70,8 +75,8 @@ fn main() -> anyhow::Result<()> {
     // --- Button (GPIO39, active low, external pull-up on board) ---
     let button = PinDriver::input(p.pins.gpio39)?;
 
-    // --- Neutral switch input (G19, bottom header): grounds when in neutral ---
-    let mut neutral = PinDriver::input(p.pins.gpio19)?;
+    // --- Neutral switch input (G23, bottom header): grounds when in neutral ---
+    let mut neutral = PinDriver::input(p.pins.gpio23)?;
     neutral.set_pull(Pull::Up)?;
 
     // --- TJA1021 SLP (G22): drive high = normal mode (not sleep) ---
@@ -109,6 +114,8 @@ fn main() -> anyhow::Result<()> {
         estimator.set_bands(bands);
     }
 
+    let demo_start = Instant::now();
+    let mut demo_last_gear: u8 = 0;
     let mut last_reconnect = Instant::now() - RECONNECT_INTERVAL;
     let mut last_learn_save = Instant::now();
     let mut diag_regs: Option<Vec<(u8, Vec<u8>)>> = None;
@@ -116,6 +123,7 @@ fn main() -> anyhow::Result<()> {
     let mut brightness_idx: usize = 1;
     let mut button_was_down = false;
     let mut button_down_at = Instant::now();
+    let mut neutral_was_active = false;
 
     loop {
         // Button: short press cycles brightness, 3s hold wipes calibration.
@@ -253,17 +261,36 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Neutral switch on G19: LOW = neutral.
+        // Neutral switch on G23: LOW = neutral.
         let neutral_active = neutral.is_low();
+        if neutral_active != neutral_was_active {
+            info!("NEUTRAL PIN: {}", if neutral_active { "LOW (neutral)" } else { "HIGH (in gear)" });
+            neutral_was_active = neutral_active;
+        }
 
-        let gear = estimator.update(
+        let mut gear = estimator.update(
             rpm,
             speed,
             gear_reg,
             neutral_active,
             clutch.unwrap_or(false),
         );
-        let frame = display::render(gear, link_up, BRIGHTNESS_STEPS[brightness_idx]);
+        if DEMO_MODE {
+            let g = (demo_start.elapsed().as_secs() / DEMO_STEP.as_secs()) % 6 + 1;
+            let g = g as u8;
+            if g != demo_last_gear {
+                info!("DEMO: showing gear {g}");
+                demo_last_gear = g;
+            }
+            gear = Gear::G(g);
+            link_up = true; // render the digit, not the all-red no-link screen
+        }
+        let brightness = if DEMO_MODE {
+            255 // demo always at full brightness
+        } else {
+            BRIGHTNESS_STEPS[brightness_idx]
+        };
+        let frame = display::render(gear, link_up, brightness);
         if let Err(e) = leds.write(frame.into_iter()) {
             warn!("LED write failed: {e}");
         }
