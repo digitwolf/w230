@@ -18,10 +18,8 @@
 //! All K-line traffic (TX frames, echoes, ECU replies) is hex-logged over USB:
 //! `espflash monitor` at 115200 to watch it.
 
-mod display;
-mod gear;
 mod kds;
-mod learn;
+mod learn_store;
 mod web;
 
 use esp_idf_hal::delay::FreeRtos;
@@ -30,12 +28,13 @@ use esp_idf_hal::prelude::*;
 use esp_idf_hal::uart::{config::Config as UartConfig, UartDriver};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
-use gear::{Gear, GearEstimator};
 use kds::Kds;
-use learn::RatioLearner;
+use learn_store::RatioLearner;
 use log::{info, warn};
 use smart_leds::SmartLedsWrite;
 use std::time::{Duration, Instant};
+use w230_core::display;
+use w230_core::gear::{Gear, GearEstimator, GearInputs};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -99,8 +98,8 @@ fn main() -> anyhow::Result<()> {
     let mut kds = Kds::new(uart);
 
     // --- Self-learning ratio calibration, persisted in NVS ---
+    // (The learning pipeline is unit-tested on the host: `cargo test-host`.)
     let nvs_part = EspDefaultNvsPartition::take()?;
-    learn::self_test(nvs_part.clone()); // end-to-end pipeline check, own namespace
     let nvs = EspNvs::new(nvs_part.clone(), "gearlearn", true)?;
     let mut learner = RatioLearner::new(nvs);
     learner.dump(); // post-ride diagnostic: full histogram in the boot log
@@ -268,13 +267,13 @@ fn main() -> anyhow::Result<()> {
             neutral_was_active = neutral_active;
         }
 
-        let mut gear = estimator.update(
+        let mut gear = estimator.update(&GearInputs {
             rpm,
             speed,
             gear_reg,
-            neutral_active,
-            clutch.unwrap_or(false),
-        );
+            neutral_switch: neutral_active,
+            clutch_pulled: clutch.unwrap_or(false),
+        });
         if DEMO_MODE {
             let g = (demo_start.elapsed().as_secs() / DEMO_STEP.as_secs()) % 6 + 1;
             let g = g as u8;

@@ -1,0 +1,12 @@
+[package]
+name = "w230-core"
+version = "0.1.0"
+authors = ["digitwolf"]
+edition = "2021"
+rust-version = "1.77"
+description = "Hardware-independent logic for the W230 gear indicator: KDS protocol framing, gear estimation, ratio learning, display rendering"
+
+[dependencies]
+log = "0.4"
+# Same RGB8 type smart-leds re-exports, without pulling in any HAL.
+rgb = "0.8"

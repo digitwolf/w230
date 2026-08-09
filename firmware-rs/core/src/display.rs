@@ -1,10 +1,10 @@
-//! 5x5 RGB matrix rendering for the M5Stack ATOM Matrix (25x WS2812, GPIO27).
+//! 5x5 RGB matrix rendering for the M5Stack ATOM Matrix (25x WS2812).
 //!
-//! The whole matrix is the gear digit: N (green), 1-5 (cyan), dash (dim red)
+//! The whole matrix is the gear digit: N (green), 1-6 (cyan), dash (dim red)
 //! for unknown. When the K-line link is down the whole matrix goes red.
 
 use crate::gear::Gear;
-use smart_leds::RGB8;
+use rgb::RGB8;
 
 /// 5x5 glyphs, one u8 row bitmask each (bit 4 = leftmost column).
 const GLYPH_N: [u8; 5] = [0b10001, 0b11001, 0b10101, 0b10011, 0b10001];
@@ -54,4 +54,64 @@ pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
 fn scale(c: RGB8, brightness: u8) -> RGB8 {
     let s = |v: u8| ((v as u16 * brightness as u16) / 255) as u8;
     RGB8::new(s(c.r), s(c.g), s(c.b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lit(frame: &[RGB8; 25]) -> usize {
+        frame
+            .iter()
+            .filter(|p| p.r as u16 + p.g as u16 + p.b as u16 > 0)
+            .count()
+    }
+
+    #[test]
+    fn no_link_is_all_red() {
+        let f = render(Gear::Neutral, false, 255);
+        assert!(f.iter().all(|p| *p == RGB8::new(255, 0, 0)));
+    }
+
+    #[test]
+    fn neutral_is_green_n() {
+        let f = render(Gear::Neutral, true, 255);
+        let expected: u32 = GLYPH_N.iter().map(|m| m.count_ones()).sum();
+        assert_eq!(lit(&f) as u32, expected);
+        assert!(f.iter().all(|p| p.r == 0)); // green has no red component
+    }
+
+    #[test]
+    fn every_gear_digit_renders_in_cyan() {
+        for g in 1..=6u8 {
+            let f = render(Gear::G(g), true, 255);
+            assert!(lit(&f) > 0, "gear {g} rendered nothing");
+            assert!(
+                f.iter().filter(|p| **p != OFF).all(|p| *p == CYAN),
+                "gear {g} not cyan"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_is_the_dim_red_dash() {
+        let f = render(Gear::Unknown, true, 255);
+        assert_eq!(lit(&f), 3); // middle-row 3-pixel dash
+        assert_eq!(f[10], OFF);
+        assert_eq!(f[11], DIM_RED);
+        assert_eq!(f[12], DIM_RED);
+        assert_eq!(f[13], DIM_RED);
+    }
+
+    #[test]
+    fn brightness_zero_blanks_everything() {
+        assert_eq!(lit(&render(Gear::Neutral, true, 0)), 0);
+        assert_eq!(lit(&render(Gear::Neutral, false, 0)), 0);
+    }
+
+    #[test]
+    fn full_brightness_is_identity() {
+        let f = render(Gear::G(1), true, 255);
+        assert!(f.iter().filter(|p| **p != OFF).all(|p| *p == CYAN));
+    }
 }

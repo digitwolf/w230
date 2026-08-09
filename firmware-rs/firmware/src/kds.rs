@@ -1,8 +1,9 @@
-//! Minimal, READ-ONLY Kawasaki KDS (ISO-14230 / KWP2000) K-line client.
+//! KDS K-line transport: UART I/O, ISO-14230 fast init, request/response
+//! timing. Framing, parsing and value decoding live in `w230_core::kds_proto`.
 //!
 //! Physical layer: single-wire K-line through a TJA1021 LIN transceiver module
 //! on UART1 @ 10400 8N1. Single wire means every transmitted byte is echoed
-//! back on RX; the driver reads and discards those echoes.
+//! back on RX; this driver reads and discards those echoes.
 //!
 //! Every frame sent and received (including echoes) is hex-dumped to the log —
 //! watch with `espflash monitor` / `cargo run`.
@@ -12,32 +13,12 @@ use esp_idf_hal::uart::UartDriver;
 use esp_idf_hal::units::Hertz;
 use log::{info, warn};
 use std::time::Duration;
-
-// KWP2000 addressing
-pub const ECU_ADDR: u8 = 0x11; // target (ECU)
-pub const TESTER_ADDR: u8 = 0xF2; // source (this module)
-
-// Service IDs
-pub const SVC_START: u8 = 0x81; // startCommunication
-pub const SVC_START_OK: u8 = 0xC1; // positive response
-pub const SVC_SESSION: u8 = 0x10; // startDiagnosticSession
-pub const SVC_SESSION_KDS: u8 = 0x80; // session type used by the KDS tool
-pub const SVC_SESSION_OK: u8 = 0x50; // positive response
-pub const SVC_READ: u8 = 0x21; // readDataByLocalIdentifier
-pub const SVC_READ_OK: u8 = 0x61; // positive response
-pub const SVC_READ_COMMON: u8 = 0x22; // readDataByCommonIdentifier (16-bit id)
-pub const SVC_READ_COMMON_OK: u8 = 0x62; // positive response
-pub const SVC_READ_IDENT: u8 = 0x1A; // readEcuIdentification
-pub const SVC_READ_IDENT_OK: u8 = 0x5A; // positive response
-
-// Local identifiers (registers) — verified live on a 2024 W230 (2026-08-02):
-// a full 0x00-0xFF scan found no gear-number and no neutral register (0x0B
-// answers 7F/12; neutral must come from the switch wire on GPIO23). 0x03
-// initially looked like a neutral flag but a clutch-hold test proved it is
-// the CLUTCH switch. 0x0A is battery volts, 0x04-0x08 look like sensor temps.
-pub const REG_RPM: u8 = 0x09; // 2 bytes: hi*100 + lo
-pub const REG_SPEED: u8 = 0x0C; // 1 byte on the W230 (2 on other models)
-pub const REG_CLUTCH: u8 = 0x03; // 2 bytes: 00 00 = lever pulled, FF FF = released
+use w230_core::kds_proto as proto;
+use w230_core::kds_proto::{
+    ParseError, REG_CLUTCH, REG_RPM, REG_SPEED, SVC_READ, SVC_READ_COMMON, SVC_READ_COMMON_OK,
+    SVC_READ_IDENT, SVC_READ_IDENT_OK, SVC_READ_OK, SVC_SESSION, SVC_SESSION_KDS, SVC_SESSION_OK,
+    SVC_START, SVC_START_OK,
+};
 
 const RSP_TIMEOUT: Duration = Duration::from_millis(250);
 const TX_BYTE_GAP: Duration = Duration::from_millis(5);
@@ -66,8 +47,7 @@ pub struct Kds<'d> {
 }
 
 impl<'d> Kds<'d> {
-    /// Wrap an already-opened 10400-baud UART (fast-init pulse must be done
-    /// beforehand on the TX pin, as raw GPIO — see `main.rs`).
+    /// Wrap an already-opened 10400-baud UART.
     pub fn new(uart: UartDriver<'d>) -> Self {
         Self {
             uart,
@@ -75,8 +55,8 @@ impl<'d> Kds<'d> {
         }
     }
 
-    /// ISO 14230 fast init + startCommunication handshake.
-    /// Returns true when the ECU ACKs (0xC1).
+    /// ISO 14230 fast init + startCommunication + startDiagnosticSession.
+    /// Returns true when the ECU completes both handshakes.
     pub fn start_communication(&mut self) -> bool {
         self.connected = false;
         info!("KDS: fast init (300ms idle, 25ms low via {BREAK_BAUD}-baud break, 25ms high)");
@@ -91,7 +71,9 @@ impl<'d> Kds<'d> {
             let _ = self.uart.change_baudrate(Hertz(KDS_BAUD));
             return false;
         }
-        self.uart.wait_tx_done(TickType::from(RSP_TIMEOUT).ticks()).ok();
+        self.uart
+            .wait_tx_done(TickType::from(RSP_TIMEOUT).ticks())
+            .ok();
         if self.uart.change_baudrate(Hertz(KDS_BAUD)).is_err() {
             warn!("KDS: could not restore {KDS_BAUD} baud");
             return false;
@@ -134,7 +116,10 @@ impl<'d> Kds<'d> {
                 true
             }
             Some(payload) => {
-                warn!("KDS: unexpected startDiagnosticSession reply: {}", hex(&payload));
+                warn!(
+                    "KDS: unexpected startDiagnosticSession reply: {}",
+                    hex(&payload)
+                );
                 false
             }
             None => {
@@ -156,15 +141,15 @@ impl<'d> Kds<'d> {
         std::thread::sleep(REQUEST_GAP); // respect P3min or the ECU ignores us
         self.send_request(&[SVC_READ, reg]).ok()?;
         let payload = self.read_response()?;
-        // Expect [0x61][reg][data...] (some ECUs omit the echoed reg)
-        if payload.first() != Some(&SVC_READ_OK) {
-            if !quiet {
-                warn!("KDS: reg {reg:02X} negative/unknown reply: {}", hex(&payload));
+        match proto::positive_data(&payload, SVC_READ_OK, &[reg]) {
+            Some(data) => Some(data.to_vec()),
+            None => {
+                if !quiet {
+                    warn!("KDS: reg {reg:02X} negative/unknown reply: {}", hex(&payload));
+                }
+                None
             }
-            return None;
         }
-        let data_off = if payload.get(1) == Some(&reg) { 2 } else { 1 };
-        Some(payload[data_off..].to_vec())
     }
 
     /// Read one 16-bit common identifier via service 0x22. Quiet on negatives.
@@ -176,19 +161,15 @@ impl<'d> Kds<'d> {
         self.send_request(&[SVC_READ_COMMON, (id >> 8) as u8, id as u8])
             .ok()?;
         let payload = self.read_response()?;
-        if payload.first() != Some(&SVC_READ_COMMON_OK) {
-            if !quiet {
-                warn!("KDS: common {id:04X} negative/unknown reply: {}", hex(&payload));
+        match proto::positive_data(&payload, SVC_READ_COMMON_OK, &[(id >> 8) as u8, id as u8]) {
+            Some(data) => Some(data.to_vec()),
+            None => {
+                if !quiet {
+                    warn!("KDS: common {id:04X} negative/unknown reply: {}", hex(&payload));
+                }
+                None
             }
-            return None;
         }
-        let off = if payload.len() >= 3 && payload[1] == (id >> 8) as u8 && payload[2] == id as u8
-        {
-            3
-        } else {
-            1
-        };
-        Some(payload[off..].to_vec())
     }
 
     /// Read one ECU identification record via service 0x1A. Quiet on negatives.
@@ -199,11 +180,7 @@ impl<'d> Kds<'d> {
         std::thread::sleep(REQUEST_GAP);
         self.send_request(&[SVC_READ_IDENT, id]).ok()?;
         let payload = self.read_response()?;
-        if payload.first() != Some(&SVC_READ_IDENT_OK) {
-            return None;
-        }
-        let off = if payload.get(1) == Some(&id) { 2 } else { 1 };
-        Some(payload[off..].to_vec())
+        proto::positive_data(&payload, SVC_READ_IDENT_OK, &[id]).map(|d| d.to_vec())
     }
 
     /// One-shot probe of every local identifier (read-only service 0x21).
@@ -223,23 +200,13 @@ impl<'d> Kds<'d> {
     }
 
     pub fn read_rpm(&mut self) -> Option<f32> {
-        let d = self.read_register(REG_RPM)?;
-        if d.len() < 2 {
-            return None;
-        }
-        let rpm = d[0] as f32 * 100.0 + d[1] as f32;
+        let rpm = proto::decode_rpm(&self.read_register(REG_RPM)?)?;
         info!("KDS: RPM = {rpm:.0}");
         Some(rpm)
     }
 
     pub fn read_speed(&mut self) -> Option<f32> {
-        let d = self.read_register(REG_SPEED)?;
-        // The W230 answers with a single byte; other Kawasakis use two ((hi<<8|lo)/2).
-        let speed = match d.len() {
-            0 => return None,
-            1 => d[0] as f32,
-            _ => ((d[0] as u16) << 8 | d[1] as u16) as f32 / 2.0,
-        };
+        let speed = proto::decode_speed(&self.read_register(REG_SPEED)?)?;
         info!("KDS: speed = {speed:.1}");
         Some(speed)
     }
@@ -247,29 +214,19 @@ impl<'d> Kds<'d> {
     /// Clutch switch from reg 0x03: `Some(true)` = lever pulled, `Some(false)`
     /// = released, `None` = no/odd reply.
     pub fn read_clutch(&mut self) -> Option<bool> {
-        let d = self.read_register(REG_CLUTCH)?;
-        match d.as_slice() {
-            [0x00, 0x00] => Some(true),
-            [0xFF, 0xFF] => Some(false),
-            other => {
-                warn!("KDS: unexpected clutch reg value {other:02X?}");
-                None
-            }
+        let data = self.read_register(REG_CLUTCH)?;
+        let clutch = proto::decode_clutch(&data);
+        if clutch.is_none() {
+            warn!("KDS: unexpected clutch reg value {data:02X?}");
         }
+        clutch
     }
 
-    // ---- framing ----
+    // ---- transport ----
 
-    /// Build [fmt][tgt][src][payload...][cs], send byte-by-byte, drain echo.
+    /// Frame the payload, send byte-by-byte, drain the single-wire echo.
     fn send_request(&mut self, payload: &[u8]) -> Result<(), ()> {
-        assert!(!payload.is_empty() && payload.len() <= 63);
-        let mut frame = Vec::with_capacity(payload.len() + 4);
-        frame.push(0x80 | payload.len() as u8);
-        frame.push(ECU_ADDR);
-        frame.push(TESTER_ADDR);
-        frame.extend_from_slice(payload);
-        let cs = frame.iter().fold(0u8, |a, b| a.wrapping_add(*b));
-        frame.push(cs);
+        let frame = proto::build_request(payload);
 
         // Log AFTER transmitting: a blocking console write here would delay the
         // first byte past the ECU's post-fast-init window.
@@ -277,7 +234,9 @@ impl<'d> Kds<'d> {
             self.uart.write(&[*b]).map_err(|e| {
                 warn!("KDS: UART write error: {e}");
             })?;
-            self.uart.wait_tx_done(TickType::from(RSP_TIMEOUT).ticks()).ok();
+            self.uart
+                .wait_tx_done(TickType::from(RSP_TIMEOUT).ticks())
+                .ok();
             std::thread::sleep(TX_BYTE_GAP);
         }
         info!("KDS TX >> {}", hex(&frame));
@@ -295,54 +254,25 @@ impl<'d> Kds<'d> {
     /// Read one response frame; log it raw; return the payload
     /// (bytes after fmt/tgt/src, before checksum).
     fn read_response(&mut self) -> Option<Vec<u8>> {
-        let fmt = self.read_byte()?;
-        let mut raw = vec![fmt];
-
-        let payload_len = if fmt & 0xC0 == 0x80 && fmt & 0x3F != 0 {
-            // length in low 6 bits of format byte; consume tgt + src
-            raw.push(self.read_byte()?);
-            raw.push(self.read_byte()?);
-            (fmt & 0x3F) as usize
-        } else {
-            // 0x80 variant with a separate length byte after tgt/src
-            raw.push(self.read_byte()?);
-            raw.push(self.read_byte()?);
-            let len = self.read_byte()?;
-            raw.push(len);
-            len as usize
-        };
-
-        let payload_start = raw.len();
-        for _ in 0..payload_len {
-            match self.read_byte() {
-                Some(b) => raw.push(b),
-                None => {
-                    warn!("KDS RX << (truncated) {}", hex(&raw));
-                    return None;
+        let mut read = || self.read_byte_inner();
+        match proto::parse_response(&mut read) {
+            Ok(frame) => {
+                if !frame.checksum_ok {
+                    warn!("KDS: checksum mismatch in {}", hex(&frame.raw));
                 }
+                info!("KDS RX << {}", hex(&frame.raw));
+                Some(frame.payload)
+            }
+            Err(ParseError::Timeout) => None,
+            Err(ParseError::Truncated(raw)) => {
+                warn!("KDS RX << (truncated) {}", hex(&raw));
+                None
+            }
+            Err(ParseError::HeldLow(_)) => {
+                warn!("KDS: RX held low (all 0x00) — transceiver unpowered or K-line shorted to ground?");
+                None
             }
         }
-        let payload = raw[payload_start..].to_vec();
-
-        // checksum byte (verify + log, tolerate mismatch with a warning)
-        if let Some(cs) = self.read_byte() {
-            raw.push(cs);
-            let want = raw[..raw.len() - 1]
-                .iter()
-                .fold(0u8, |a, b| a.wrapping_add(*b));
-            if cs != want {
-                warn!("KDS: checksum mismatch (got {cs:02X}, want {want:02X})");
-            }
-        }
-        info!("KDS RX << {}", hex(&raw));
-        // A frame of nothing but 0x00 means the UART is sampling a line that
-        // is stuck dominant/low: transceiver unpowered, or K-line shorted to
-        // ground. A real ECU frame always has a non-zero format byte.
-        if raw.iter().all(|&b| b == 0) {
-            warn!("KDS: RX held low (all 0x00) — transceiver unpowered or K-line shorted to ground?");
-            return None;
-        }
-        Some(payload)
     }
 
     /// Discard anything sitting in the RX FIFO (stale echoes, noise).
@@ -351,7 +281,7 @@ impl<'d> Kds<'d> {
         while matches!(self.uart.read(&mut b, 0), Ok(n) if n > 0) {}
     }
 
-    fn read_byte(&mut self) -> Option<u8> {
+    fn read_byte_inner(&self) -> Option<u8> {
         let mut b = [0u8; 1];
         match self.uart.read(&mut b, TickType::from(RSP_TIMEOUT).ticks()) {
             Ok(1) => Some(b[0]),
@@ -362,7 +292,7 @@ impl<'d> Kds<'d> {
     fn read_exact(&mut self, buf: &mut [u8]) -> usize {
         let mut n = 0;
         while n < buf.len() {
-            match self.read_byte() {
+            match self.read_byte_inner() {
                 Some(b) => {
                     buf[n] = b;
                     n += 1;

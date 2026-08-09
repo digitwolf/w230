@@ -21,23 +21,10 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{AccessPointConfiguration, AuthMethod, Configuration, EspWifi};
 use log::info;
 
-use crate::gear::{Gear, NUM_GEARS};
-use crate::learn::RATIO_MIN;
+use w230_core::diag::{hist_csv, status_json, Snapshot};
 
 const SSID: &str = "W230-GEAR";
 const PASSWORD: &str = "w230diag";
-
-#[derive(Default, Clone)]
-pub struct Snapshot {
-    pub link_up: bool,
-    pub gear: Option<Gear>,
-    pub rpm: Option<f32>,
-    pub speed: Option<f32>,
-    pub clutch: Option<bool>,
-    pub samples: u32,
-    pub bands: Option<[f32; NUM_GEARS]>,
-    pub hist: Vec<u16>, // BINS entries
-}
 
 pub struct WebDiag {
     pub shared: Arc<Mutex<Snapshot>>,
@@ -90,12 +77,7 @@ pub fn start(
         let shared = shared.clone();
         server.fn_handler("/hist.csv", Method::Get, move |req| {
             let s = shared.lock().unwrap().clone();
-            let mut csv = String::from("ratio,count\n");
-            for (i, c) in s.hist.iter().enumerate() {
-                if *c > 0 {
-                    csv.push_str(&format!("{:.1},{c}\n", RATIO_MIN + i as f32 + 0.5));
-                }
-            }
+            let csv = hist_csv(&s.hist);
             let mut resp =
                 req.into_response(200, Some("OK"), &[("Content-Type", "text/csv")])?;
             resp.write(csv.as_bytes())?;
@@ -119,33 +101,6 @@ pub fn start(
         _wifi: wifi,
         _server: server,
     })
-}
-
-fn status_json(s: &Snapshot) -> String {
-    let gear = match s.gear {
-        Some(Gear::Neutral) => "\"N\"".to_string(),
-        Some(Gear::G(n)) => format!("\"{n}\""),
-        _ => "\"-\"".to_string(),
-    };
-    let opt_f = |v: Option<f32>| v.map_or("null".to_string(), |x| format!("{x:.1}"));
-    let opt_b = |v: Option<bool>| v.map_or("null".to_string(), |x| x.to_string());
-    let bands = s.bands.map_or("null".to_string(), |b| {
-        format!(
-            "[{}]",
-            b.iter()
-                .map(|x| format!("{x:.1}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    });
-    format!(
-        "{{\"link\":{},\"gear\":{gear},\"rpm\":{},\"speed\":{},\"clutch\":{},\"samples\":{},\"bands\":{bands}}}",
-        s.link_up,
-        opt_f(s.rpm),
-        opt_f(s.speed),
-        opt_b(s.clutch),
-        s.samples,
-    )
 }
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
