@@ -47,7 +47,7 @@ WiFi dashboard: SSID `W230-GEAR`, password `w230diag`, http://192.168.71.1/ — 
 - Full 0x00–0xFF scan of service 0x21: 59 registers. Service 0x22 absent; 0x1A = ID strings. **No gear-number or neutral register exists.**
 - 0x09 RPM, 2 bytes, **quarter-rpm: `(hi<<8|lo)/4`** — tach-verified. (The `hi*100+lo` formula found in other Kawasaki tools reads ~60 % high on this ECU and was disproven here.)
 - 0x0C speed, 1 byte, km/h — verified against wheel motion.
-- 0x03 clutch switch: `0000` pulled / `FFFF` released — verified incl. engine running. Initially misread as a neutral flag; a clutch-hold test disproved that.
+- 0x03 is the neutral+clutch INTERLOCK chain (series switches): `0000` only in neutral with the lever pulled, `FFFF` in all other static states, and an undecoded third value while moving (being captured by the ride black box). Not usable as a clutch or neutral source — it was misread as both before the full truth table was tested.
 - 0x0A battery volts ×0.01 (approx), 0x04–0x08 temps/sensors.
 - Requests need ≥55 ms spacing (P3min) or the ECU silently ignores them; fast init needs the request immediately after the 25 ms low pulse (logging before TX breaks it).
 
