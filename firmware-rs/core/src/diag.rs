@@ -1,6 +1,6 @@
 //! Diagnostic snapshot shared with the WiFi dashboard, and its wire formats.
 
-use crate::gear::{Gear, NUM_GEARS};
+use crate::gear::Gear;
 use crate::learn::RATIO_MIN;
 
 /// One poll-cycle's state, published by the main loop for the HTTP handlers.
@@ -10,9 +10,11 @@ pub struct Snapshot {
     pub gear: Option<Gear>,
     pub rpm: Option<f32>,
     pub speed: Option<f32>,
-    pub clutch: Option<bool>,
+    pub ecu_neutral: Option<bool>,
     pub samples: u32,
-    pub bands: Option<[f32; NUM_GEARS]>,
+    /// Learned ratio bands, 1st gear first; empty until calibrated (may be a
+    /// partial set during progressive calibration).
+    pub bands: Vec<f32>,
     /// Histogram counts (BINS entries).
     pub hist: Vec<u16>,
 }
@@ -26,21 +28,24 @@ pub fn status_json(s: &Snapshot) -> String {
     };
     let opt_f = |v: Option<f32>| v.map_or("null".to_string(), |x| format!("{x:.1}"));
     let opt_b = |v: Option<bool>| v.map_or("null".to_string(), |x| x.to_string());
-    let bands = s.bands.map_or("null".to_string(), |b| {
+    let bands = if s.bands.is_empty() {
+        "null".to_string()
+    } else {
         format!(
             "[{}]",
-            b.iter()
+            s.bands
+                .iter()
                 .map(|x| format!("{x:.1}"))
                 .collect::<Vec<_>>()
                 .join(",")
         )
-    });
+    };
     format!(
-        "{{\"link\":{},\"gear\":{gear},\"rpm\":{},\"speed\":{},\"clutch\":{},\"samples\":{},\"bands\":{bands}}}",
+        "{{\"link\":{},\"gear\":{gear},\"rpm\":{},\"speed\":{},\"ecuNeutral\":{},\"samples\":{},\"bands\":{bands}}}",
         s.link_up,
         opt_f(s.rpm),
         opt_f(s.speed),
-        opt_b(s.clutch),
+        opt_b(s.ecu_neutral),
         s.samples,
     )
 }
@@ -67,15 +72,15 @@ mod tests {
             gear: Some(Gear::G(4)),
             rpm: Some(4000.0),
             speed: Some(40.0),
-            clutch: Some(false),
+            ecu_neutral: Some(false),
             samples: 268,
-            bands: Some([240.4, 165.4, 125.4, 99.5, 81.6, 69.7]),
+            bands: vec![240.4, 165.4, 125.4, 99.5, 81.6, 69.7],
             hist: vec![],
         };
         assert_eq!(
             status_json(&s),
             "{\"link\":true,\"gear\":\"4\",\"rpm\":4000.0,\"speed\":40.0,\
-             \"clutch\":false,\"samples\":268,\
+             \"ecuNeutral\":false,\"samples\":268,\
              \"bands\":[240.4,165.4,125.4,99.5,81.6,69.7]}"
         );
     }
@@ -86,7 +91,7 @@ mod tests {
         assert_eq!(
             status_json(&s),
             "{\"link\":false,\"gear\":\"-\",\"rpm\":null,\"speed\":null,\
-             \"clutch\":null,\"samples\":0,\"bands\":null}"
+             \"ecuNeutral\":null,\"samples\":0,\"bands\":null}"
         );
     }
 

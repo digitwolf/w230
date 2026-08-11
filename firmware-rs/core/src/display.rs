@@ -19,16 +19,20 @@ const GLYPH_DASH: [u8; 5] = [0b00000, 0b00000, 0b01110, 0b00000, 0b00000];
 const GREEN: RGB8 = RGB8::new(0, 255, 40);
 const CYAN: RGB8 = RGB8::new(0, 180, 255);
 const DIM_RED: RGB8 = RGB8::new(120, 10, 0);
+const DIM_GREEN: RGB8 = RGB8::new(0, 140, 20);
 const STATUS_RED: RGB8 = RGB8::new(255, 0, 0);
 const OFF: RGB8 = RGB8::new(0, 0, 0);
 
 /// Render the gear into a 25-pixel row-major frame buffer.
 /// `brightness` scales 0..=255. `link_up` = K-line connected.
-pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
+/// `learn_flash` recolours the unknown-gear dash green — the "calibration
+/// data just persisted" heartbeat, visible without the dashboard.
+pub fn render(gear: Gear, link_up: bool, brightness: u8, learn_flash: bool) -> [RGB8; 25] {
     if !link_up {
         return [scale(STATUS_RED, brightness); 25]; // NO-LINK: all red
     }
 
+    let dash_colour = if learn_flash { DIM_GREEN } else { DIM_RED };
     let (glyph, colour) = match gear {
         Gear::Neutral => (&GLYPH_N, GREEN),
         Gear::G(1) => (&GLYPH_1, CYAN),
@@ -37,7 +41,7 @@ pub fn render(gear: Gear, link_up: bool, brightness: u8) -> [RGB8; 25] {
         Gear::G(4) => (&GLYPH_4, CYAN),
         Gear::G(5) => (&GLYPH_5, CYAN),
         Gear::G(6) => (&GLYPH_6, CYAN),
-        _ => (&GLYPH_DASH, DIM_RED),
+        _ => (&GLYPH_DASH, dash_colour),
     };
 
     let mut px = [OFF; 25];
@@ -69,13 +73,13 @@ mod tests {
 
     #[test]
     fn no_link_is_all_red() {
-        let f = render(Gear::Neutral, false, 255);
+        let f = render(Gear::Neutral, false, 255, false);
         assert!(f.iter().all(|p| *p == RGB8::new(255, 0, 0)));
     }
 
     #[test]
     fn neutral_is_green_n() {
-        let f = render(Gear::Neutral, true, 255);
+        let f = render(Gear::Neutral, true, 255, false);
         let expected: u32 = GLYPH_N.iter().map(|m| m.count_ones()).sum();
         assert_eq!(lit(&f) as u32, expected);
         assert!(f.iter().all(|p| p.r == 0)); // green has no red component
@@ -84,7 +88,7 @@ mod tests {
     #[test]
     fn every_gear_digit_renders_in_cyan() {
         for g in 1..=6u8 {
-            let f = render(Gear::G(g), true, 255);
+            let f = render(Gear::G(g), true, 255, false);
             assert!(lit(&f) > 0, "gear {g} rendered nothing");
             assert!(
                 f.iter().filter(|p| **p != OFF).all(|p| *p == CYAN),
@@ -95,7 +99,7 @@ mod tests {
 
     #[test]
     fn unknown_is_the_dim_red_dash() {
-        let f = render(Gear::Unknown, true, 255);
+        let f = render(Gear::Unknown, true, 255, false);
         assert_eq!(lit(&f), 3); // middle-row 3-pixel dash
         assert_eq!(f[10], OFF);
         assert_eq!(f[11], DIM_RED);
@@ -105,13 +109,22 @@ mod tests {
 
     #[test]
     fn brightness_zero_blanks_everything() {
-        assert_eq!(lit(&render(Gear::Neutral, true, 0)), 0);
-        assert_eq!(lit(&render(Gear::Neutral, false, 0)), 0);
+        assert_eq!(lit(&render(Gear::Neutral, true, 0, false)), 0);
+        assert_eq!(lit(&render(Gear::Neutral, false, 0, false)), 0);
+    }
+
+    #[test]
+    fn learn_flash_turns_dash_green() {
+        let f = render(Gear::Unknown, true, 255, true);
+        assert_eq!(f[11], DIM_GREEN);
+        // Digits and N are never recoloured by the flash.
+        let n = render(Gear::Neutral, true, 255, true);
+        assert!(n.iter().filter(|p| **p != OFF).all(|p| *p == GREEN));
     }
 
     #[test]
     fn full_brightness_is_identity() {
-        let f = render(Gear::G(1), true, 255);
+        let f = render(Gear::G(1), true, 255, false);
         assert!(f.iter().filter(|p| **p != OFF).all(|p| *p == CYAN));
     }
 }

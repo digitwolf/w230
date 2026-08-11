@@ -21,14 +21,16 @@ pub const SVC_READ_COMMON_OK: u8 = 0x62; // positive response
 pub const SVC_READ_IDENT: u8 = 0x1A; // readEcuIdentification
 pub const SVC_READ_IDENT_OK: u8 = 0x5A; // positive response
 
-// Local identifiers (registers) — verified live on a 2024 W230 (2026-08-02):
-// a full 0x00-0xFF scan found no gear-number and no neutral register (0x0B
-// answers 7F/12; neutral comes from the switch wire on GPIO23). 0x03 initially
-// looked like a neutral flag but a clutch-hold test proved it is the CLUTCH
-// switch. 0x0A is battery volts, 0x04-0x08 look like sensor temps.
-pub const REG_RPM: u8 = 0x09; // 2 bytes: hi*100 + lo
+// Local identifiers (registers) — verified live on a 2024 W230:
+// a full 0x00-0xFF scan found no gear-number register (0x0B answers 7F/12).
+// 0x03 is the neutral+clutch INTERLOCK chain (switches in series): 00 00 only
+// when in neutral with the lever pulled, FF FF otherwise (bench truth table,
+// all four states tested). While MOVING it returns some third value not yet
+// captured — see the interlock-odd tally in the firmware's ride black box.
+// 0x0A is battery volts, 0x04-0x08 look like temps.
+pub const REG_RPM: u8 = 0x09; // 2 bytes: quarter-rpm
 pub const REG_SPEED: u8 = 0x0C; // 1 byte on the W230 (2 on other models)
-pub const REG_CLUTCH: u8 = 0x03; // 2 bytes: 00 00 = lever pulled, FF FF = released
+pub const REG_INTERLOCK: u8 = 0x03; // 2 bytes: 00 00 = neutral+clutch, FF FF = otherwise
 
 /// Longest payload a single 0x80-format frame can carry (6-bit length field).
 pub const MAX_PAYLOAD: usize = 63;
@@ -151,10 +153,13 @@ pub fn positive_data<'p>(payload: &'p [u8], ok_service: u8, echoed_id: &[u8]) ->
     Some(&payload[off..])
 }
 
-/// RPM from register 0x09 data: `hi*100 + lo`.
+/// RPM from register 0x09 data: standard KWP quarter-rpm, `(hi<<8|lo)/4`.
+/// (Verified against the tachometer on the running W230: bytes [0x1C,0x52]
+/// while the tach read ~1800. The `hi*100+lo` formula seen in other Kawasaki
+/// tools reads ~60% high on this ECU.)
 pub fn decode_rpm(data: &[u8]) -> Option<f32> {
     match data {
-        [hi, lo, ..] => Some(*hi as f32 * 100.0 + *lo as f32),
+        [hi, lo, ..] => Some(((*hi as u16) << 8 | *lo as u16) as f32 / 4.0),
         _ => None,
     }
 }
@@ -169,8 +174,11 @@ pub fn decode_speed(data: &[u8]) -> Option<f32> {
     }
 }
 
-/// Clutch switch from register 0x03 data: `Some(true)` = lever pulled.
-pub fn decode_clutch(data: &[u8]) -> Option<bool> {
+/// Interlock chain from register 0x03: `Some(true)` = neutral WITH clutch
+/// pulled (both series switches closed), `Some(false)` = any other static
+/// state, `None` = unrecognised (seen while the bike is moving; captured to
+/// the ride black box for decoding).
+pub fn decode_interlock(data: &[u8]) -> Option<bool> {
     match data {
         [0x00, 0x00] => Some(true),
         [0xFF, 0xFF] => Some(false),
@@ -313,7 +321,8 @@ mod tests {
 
     #[test]
     fn decodes_rpm() {
-        assert_eq!(decode_rpm(&[0x12, 0x22]), Some(18.0 * 100.0 + 34.0));
+        // Real capture: bytes 0x1C52 with the tach reading ~1800 rpm.
+        assert_eq!(decode_rpm(&[0x1C, 0x52]), Some(1812.5));
         assert_eq!(decode_rpm(&[0x00, 0x00]), Some(0.0));
         assert_eq!(decode_rpm(&[0x12]), None);
     }
@@ -326,9 +335,9 @@ mod tests {
     }
 
     #[test]
-    fn decodes_clutch() {
-        assert_eq!(decode_clutch(&[0x00, 0x00]), Some(true)); // pulled
-        assert_eq!(decode_clutch(&[0xFF, 0xFF]), Some(false)); // released
-        assert_eq!(decode_clutch(&[0x00, 0xFF]), None);
+    fn decodes_interlock() {
+        assert_eq!(decode_interlock(&[0x00, 0x00]), Some(true)); // neutral+clutch
+        assert_eq!(decode_interlock(&[0xFF, 0xFF]), Some(false));
+        assert_eq!(decode_interlock(&[0x00, 0xFF]), None); // moving-state mystery
     }
 }

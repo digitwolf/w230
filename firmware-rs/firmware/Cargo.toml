@@ -22,6 +22,7 @@ log = "0.4"
 esp-idf-svc = { version = "0.51", default-features = false }
 esp-idf-hal = "0.45"
 smart-leds = "0.4"
+rgb = "0.8"
 ws2812-esp32-rmt-driver = { version = "0.12", features = ["smart-leds-trait"] }
 
 [build-dependencies]

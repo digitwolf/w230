@@ -3,10 +3,9 @@
 //! Reads the KDS diagnostic K-line through a LINTTL3 (TJA1021/SIT1021T)
 //! TTL-UART<->LIN module and shows the current gear on the 5x5 LED matrix:
 //! green N, cyan 1-6, dim red dash when unknown, all red = no link.
-//! The ECU exposes no gear or neutral register, so N comes from the bike's
-//! neutral-switch wire on G23 (required) and gears 1-6 from the RPM/speed
-//! ratio. ECU reg 0x03 is the clutch switch — it pauses ratio classification
-//! while the lever is pulled.
+//! Neutral comes from the switch wire on G23 (reg 0x03 is the neutral+clutch
+//! interlock chain, unusable as a neutral or clutch source); gears 1-6 come
+//! from the RPM/speed ratio (factory-preset bands, refined by ride learning).
 //!
 //! Wiring (module pins per vendor sheet — note TX/RX are named from the
 //! MODULE's perspective, so they cross over to the ESP32):
@@ -37,12 +36,19 @@ use w230_core::display;
 use w230_core::gear::{Gear, GearEstimator, GearInputs};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
 const BRIGHTNESS_STEPS: [u8; 3] = [40, 120, 255];
-const LEARN_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+// Short interval: on the bike, key-off cuts our power instantly — anything
+// unsaved is gone. Writes only happen when new samples arrived (dirty flag),
+// so this costs ~20 NVS writes/minute of actual riding — fine for NVS wear
+// during the calibration phase; can be relaxed once bands are learned.
+const LEARN_SAVE_INTERVAL: Duration = Duration::from_secs(3);
 /// Button hold this long = wipe the learned calibration.
 const LEARN_RESET_HOLD: Duration = Duration::from_secs(3);
+/// The interlock register changes on human timescales — reading it every Nth
+/// cycle buys ~130 ms on the other cycles.
+const INTERLOCK_EVERY_N_CYCLES: u32 = 3;
 
 /// Gear-register hunt: scan all local identifiers once after connecting, then
 /// keep re-reading the supported ones and log every value change. Shift
@@ -60,6 +66,40 @@ const DEMO_STEP: Duration = Duration::from_secs(15);
 /// (Run 2026-08-02: service 0x22 absent entirely; 0x1A yields ID strings only
 /// — confirmed no neutral/gear data exists beyond the 59 0x21 registers.)
 const DEEP_SCAN: bool = false;
+
+/// Fast-path neutral check, callable between the slow KDS register reads: the
+/// switch commits instantly in the estimator, so sampling it here cuts N
+/// latency from a full cycle (~0.4 s) to one register read (~0.13 s). Only the
+/// neutral transition re-renders; ratio classification stays once per cycle
+/// where a coherent rpm/speed pair exists.
+#[allow(clippy::too_many_arguments)]
+fn neutral_tick(
+    neutral_low: bool,
+    neutral_was: &mut bool,
+    estimator: &mut GearEstimator,
+    leds: &mut Ws2812Esp32Rmt,
+    link_up: bool,
+    brightness: u8,
+) {
+    if neutral_low == *neutral_was {
+        return;
+    }
+    info!(
+        "NEUTRAL PIN: {}",
+        if neutral_low { "LOW (neutral)" } else { "HIGH (in gear)" }
+    );
+    *neutral_was = neutral_low;
+    let gear = estimator.update(&GearInputs {
+        neutral_switch: neutral_low,
+        ..Default::default()
+    });
+    if !DEMO_MODE {
+        let frame = display::render(gear, link_up, brightness, false);
+        if let Err(e) = leds.write(frame.into_iter()) {
+            warn!("LED write failed: {e}");
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -109,8 +149,11 @@ fn main() -> anyhow::Result<()> {
     let webdiag = web::start(p.modem, sysloop, nvs_part)?;
 
     let mut estimator = GearEstimator::new();
-    if let Some(bands) = learner.derive_bands() {
-        estimator.set_bands(bands);
+    // Factory-provisional bands: digits work with zero calibration; learned
+    // bands replace them below as soon as riding data yields peaks.
+    estimator.set_bands(w230_core::gear::FACTORY_BANDS, w230_core::gear::NUM_GEARS);
+    if let Some((bands, count)) = learner.derive_bands() {
+        estimator.set_bands(bands, count);
     }
 
     let demo_start = Instant::now();
@@ -123,6 +166,17 @@ fn main() -> anyhow::Result<()> {
     let mut button_was_down = false;
     let mut button_down_at = Instant::now();
     let mut neutral_was_active = false;
+    let mut cycle: u32 = 0;
+    // Interlock state (neutral+clutch chain) between its every-Nth-cycle reads.
+    let mut interlock: Option<bool> = None;
+    // Previous cycle's raw RPM reading + timestamp, for time-aligning the
+    // rpm/speed pair under acceleration.
+    let mut prev_rpm: Option<(f32, Instant)> = None;
+    // Green-dash heartbeat: lit briefly after each calibration NVS write.
+    let mut learn_flash_until = Instant::now() - Duration::from_secs(1);
+    // Last frame pushed to the strip: WS2812 writes are vulnerable to WiFi
+    // interrupt jitter (random glitch pixels), so only rewrite on change.
+    let mut last_frame: Option<[rgb::RGB8; 25]> = None;
 
     loop {
         // Button: short press cycles brightness, 3s hold wipes calibration.
@@ -229,21 +283,69 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        let mut clutch = None;
+        // rpm for classification/learning may be time-aligned; publish raw.
+        let mut rpm_aligned = None;
         if kds.connected && !DIAG_SCAN {
+            let brightness = BRIGHTNESS_STEPS[brightness_idx];
             rpm = kds.read_rpm();
+            let t_rpm = Instant::now();
+            neutral_tick(
+                neutral.is_low(),
+                &mut neutral_was_active,
+                &mut estimator,
+                &mut leds,
+                true,
+                brightness,
+            );
             speed = kds.read_speed();
-            clutch = kds.read_clutch();
-            // Losing all three in one cycle = link is dead; force re-init.
-            if rpm.is_none() && speed.is_none() && clutch.is_none() {
+            // Time-align rpm to the moment the speed byte was captured: the
+            // reads are ~130 ms apart, which skews the ratio under acceleration.
+            rpm_aligned = rpm;
+            if let (Some(r), Some((pr, pt))) = (rpm, prev_rpm) {
+                if speed.is_some() {
+                    let dt_ms = (t_rpm - pt).as_millis() as f32;
+                    let lead_ms = t_rpm.elapsed().as_millis() as f32;
+                    rpm_aligned = Some(w230_core::gear::time_align_rpm(r, pr, dt_ms, lead_ms));
+                }
+            }
+            if let Some(r) = rpm {
+                prev_rpm = Some((r, t_rpm));
+            }
+            neutral_tick(
+                neutral.is_low(),
+                &mut neutral_was_active,
+                &mut estimator,
+                &mut leds,
+                true,
+                brightness,
+            );
+            if cycle % INTERLOCK_EVERY_N_CYCLES == 0 {
+                match kds.read_interlock() {
+                    Ok(Some(v)) => interlock = Some(v),
+                    Ok(None) => {}
+                    Err(raw) => {
+                        learner.note_interlock_odd(raw);
+                        interlock = None; // unknown state
+                    }
+                }
+            }
+            // rpm and speed are read every cycle; both failing = link is dead.
+            if rpm.is_none() && speed.is_none() {
                 warn!("KDS: no data — dropping link for re-init");
                 kds.connected = false;
+                interlock = None;
+                prev_rpm = None;
+                learner.note_link_drop();
                 learner.save(); // key-off is how rides end — don't lose the tail
             } else {
                 link_up = true;
-                if let (Some(r), Some(s)) = (rpm, speed) {
-                    // Unknown clutch counts as pulled: never learn from it.
-                    learner.add_sample(r, s, clutch.unwrap_or(true));
+                // Learning gates: the G23 neutral wire, plus the interlock
+                // when it definitively reads neutral+clutch. No clutch-only
+                // source exists; shift transients are absorbed by the
+                // histogram's peak-mass filters.
+                let neutral_now = neutral.is_low() || interlock == Some(true);
+                if let (Some(r), Some(s)) = (rpm_aligned, speed) {
+                    learner.add_sample(r, s, false, neutral_now);
                 }
             }
         }
@@ -254,25 +356,28 @@ fn main() -> anyhow::Result<()> {
         if last_learn_save.elapsed() >= LEARN_SAVE_INTERVAL {
             last_learn_save = Instant::now();
             if learner.save() {
-                if let Some(bands) = learner.derive_bands() {
-                    estimator.set_bands(bands);
+                learn_flash_until = Instant::now() + Duration::from_millis(800);
+                if let Some((bands, count)) = learner.derive_bands() {
+                    estimator.set_bands(bands, count);
                 }
             }
         }
 
-        // Neutral switch on G23: LOW = neutral.
-        let neutral_active = neutral.is_low();
-        if neutral_active != neutral_was_active {
-            info!("NEUTRAL PIN: {}", if neutral_active { "LOW (neutral)" } else { "HIGH (in gear)" });
-            neutral_was_active = neutral_active;
+        // Neutral: the G23 switch wire (LOW = neutral). The interlock's
+        // definitive neutral+clutch state also implies neutral.
+        let pin_low = neutral.is_low();
+        if pin_low != neutral_was_active {
+            info!("NEUTRAL PIN: {}", if pin_low { "LOW (neutral)" } else { "HIGH (in gear)" });
+            neutral_was_active = pin_low;
         }
+        let neutral_active = pin_low || interlock == Some(true);
 
         let mut gear = estimator.update(&GearInputs {
-            rpm,
+            rpm: rpm_aligned,
             speed,
             gear_reg,
             neutral_switch: neutral_active,
-            clutch_pulled: clutch.unwrap_or(false),
+            clutch_pulled: false,
         });
         if DEMO_MODE {
             let g = (demo_start.elapsed().as_secs() / DEMO_STEP.as_secs()) % 6 + 1;
@@ -289,9 +394,17 @@ fn main() -> anyhow::Result<()> {
         } else {
             BRIGHTNESS_STEPS[brightness_idx]
         };
-        let frame = display::render(gear, link_up, brightness);
-        if let Err(e) = leds.write(frame.into_iter()) {
-            warn!("LED write failed: {e}");
+        let frame = display::render(
+            gear,
+            link_up,
+            brightness,
+            Instant::now() < learn_flash_until,
+        );
+        if last_frame != Some(frame) {
+            if let Err(e) = leds.write(frame.into_iter()) {
+                warn!("LED write failed: {e}");
+            }
+            last_frame = Some(frame);
         }
 
         // Publish to the WiFi dashboard; act on a requested calibration wipe.
@@ -306,13 +419,14 @@ fn main() -> anyhow::Result<()> {
             s.gear = Some(gear);
             s.rpm = rpm;
             s.speed = speed;
-            s.clutch = clutch;
+            s.ecu_neutral = interlock;
             s.samples = learner.samples();
-            s.bands = estimator.bands();
+            s.bands = estimator.bands().map(|b| b.to_vec()).unwrap_or_default();
             s.hist.clear();
             s.hist.extend_from_slice(learner.hist());
         }
 
+        cycle = cycle.wrapping_add(1);
         FreeRtos::delay_ms(POLL_INTERVAL.as_millis() as u32);
     }
 }

@@ -1457,6 +1457,7 @@ dependencies = [
  "esp-idf-hal",
  "esp-idf-svc",
  "log",
+ "rgb",
  "smart-leds",
  "w230-core",
  "ws2812-esp32-rmt-driver",

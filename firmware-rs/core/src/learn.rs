@@ -18,11 +18,33 @@ pub const BINS: usize = 300; // 1.0-wide bins covering ratio 20..320
 pub const BLOB_LEN: usize = 4 + BINS * 2; // [samples: u32 LE][counts: u16 LE × BINS]
 
 const MIN_RPM: f32 = 1200.0;
-const MIN_SPEED: f32 = 5.0;
+/// Below this the 1-byte integer speed quantises too coarsely (±8% ratio
+/// error at 6 km/h) and smears the low-gear peaks.
+const MIN_SPEED: f32 = 10.0;
 /// Samples in a peak's 3-bin neighbourhood before it counts as a gear.
 const MIN_PEAK_MASS: u32 = 15;
 /// Two peaks closer than this (relative ratio) are one gear, keep the bigger.
 const PEAK_SEPARATION: f32 = 0.06;
+/// Adjacent learned bands must step by a plausible gearbox factor; anything
+/// outside means a fake peak got in (or a gear was skipped during a partial
+/// ride), and the calibration is rejected whole.
+const STEP_MIN: f32 = 1.08;
+const STEP_MAX: f32 = 1.60;
+/// Fewest peaks that make a usable partial calibration.
+const MIN_PEAKS: usize = 2;
+
+/// Why a sample was or wasn't counted — the firmware persists per-ride
+/// tallies of these so a USB-less ride can be debugged afterwards.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SampleOutcome {
+    Accepted,
+    ClutchPulled,
+    InNeutral,
+    RpmLow,
+    SpeedLow,
+    OutOfRange,
+    BinFull,
+}
 
 /// Fixed-size decimating histogram of rpm/speed ratios.
 #[derive(Clone)]
@@ -58,25 +80,54 @@ impl RatioHistogram {
         self.samples = 0;
     }
 
-    /// Feed one poll-loop sample. Returns true when the sample was counted;
-    /// ignored (false) unless the bike is moving under engine power with the
-    /// clutch out — the only state where rpm/speed actually encodes the gear.
-    pub fn add_sample(&mut self, rpm: f32, speed: f32, clutch_pulled: bool) -> bool {
-        if clutch_pulled || rpm < MIN_RPM || speed < MIN_SPEED {
-            return false;
+    /// Feed one poll-loop sample. Counted only when the bike is moving under
+    /// engine power, in gear, with the clutch out — the only state where
+    /// rpm/speed encodes the gear. (`in_neutral` guards against coasting in
+    /// neutral, where the engine is decoupled and the ratio is garbage.)
+    pub fn add_sample(
+        &mut self,
+        rpm: f32,
+        speed: f32,
+        clutch_pulled: bool,
+        in_neutral: bool,
+    ) -> SampleOutcome {
+        if clutch_pulled {
+            return SampleOutcome::ClutchPulled;
+        }
+        if in_neutral {
+            return SampleOutcome::InNeutral;
+        }
+        if rpm < MIN_RPM {
+            return SampleOutcome::RpmLow;
+        }
+        if speed < MIN_SPEED {
+            return SampleOutcome::SpeedLow;
         }
         let bin = (rpm / speed - RATIO_MIN).floor();
         if !(0.0..BINS as f32).contains(&bin) {
-            return false;
+            return SampleOutcome::OutOfRange;
         }
         let bin = bin as usize;
         if self.hist[bin] < u16::MAX {
             self.hist[bin] += 1;
             self.samples = self.samples.saturating_add(1);
-            true
+            SampleOutcome::Accepted
         } else {
-            false
+            SampleOutcome::BinFull
         }
+    }
+
+    /// TEMPORARY diagnostics: bump the lowest bin (ratio ~20.5, impossibly
+    /// low for any real gear) so the persistence path is provable end-to-end
+    /// with no riding data. Capped far below `MIN_PEAK_MASS` so the marker
+    /// can never form a peak or affect calibration.
+    pub fn debug_mark(&mut self) -> bool {
+        if self.hist[0] >= 5 {
+            return false;
+        }
+        self.hist[0] += 1;
+        self.samples = self.samples.saturating_add(1);
+        true
     }
 
     /// Serialise to the flat NVS blob layout.
@@ -111,10 +162,12 @@ impl RatioHistogram {
             .map(|(i, c)| (RATIO_MIN + i as f32 + 0.5, *c))
     }
 
-    /// Peak-detect the histogram into per-gear ratio bands. Returns bands only
-    /// when all `NUM_GEARS` gears are confidently present — a partial ride
-    /// must not produce a half-calibrated classifier.
-    pub fn derive_bands(&self) -> Option<[f32; NUM_GEARS]> {
+    /// Peak-detect the histogram into per-gear ratio bands. Returns the bands
+    /// plus how many are valid (`MIN_PEAKS..=NUM_GEARS`). A partial result
+    /// assumes the highest-ratio peak is 1st gear — i.e. the rider covered
+    /// consecutive gears from 1st; skipped gears fail the step-sanity check
+    /// rather than mislabel.
+    pub fn derive_bands(&self) -> Option<([f32; NUM_GEARS], usize)> {
         let h = |j: isize| -> u32 {
             if (0..BINS as isize).contains(&j) {
                 self.hist[j as usize] as u32
@@ -153,9 +206,9 @@ impl RatioHistogram {
         for (r, m) in &accepted {
             info!("LEARN: peak ratio {r:.1} (mass {m})");
         }
-        if accepted.len() < NUM_GEARS {
+        if accepted.len() < MIN_PEAKS {
             info!(
-                "LEARN: {}/{} gear peaks found — ride all gears steadily to finish calibration",
+                "LEARN: only {}/{} gear peaks — ride steadily in at least two gears",
                 accepted.len(),
                 NUM_GEARS
             );
@@ -164,12 +217,30 @@ impl RatioHistogram {
         accepted.truncate(NUM_GEARS);
         // Highest ratio = shortest gearing = 1st.
         accepted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let count = accepted.len();
         let mut bands = [0.0f32; NUM_GEARS];
         for (i, (r, _)) in accepted.iter().enumerate() {
             bands[i] = *r;
         }
-        info!("LEARN: calibration complete, bands {bands:.1?}");
-        Some(bands)
+        // Sanity: adjacent gears step by a plausible factor. A step outside
+        // the window means a fake peak got in, or a partial ride skipped a
+        // gear — reject rather than mislabel.
+        for w in bands[..count].windows(2) {
+            let step = w[0] / w[1];
+            if !(STEP_MIN..=STEP_MAX).contains(&step) {
+                info!(
+                    "LEARN: implausible gear step {:.2} between ratios {:.1} and {:.1} — rejecting calibration",
+                    step, w[0], w[1]
+                );
+                return None;
+            }
+        }
+        if count < NUM_GEARS {
+            info!("LEARN: partial calibration {count}/{NUM_GEARS} (assumes 1st..{count}), bands {:.1?}", &bands[..count]);
+        } else {
+            info!("LEARN: calibration complete, bands {bands:.1?}");
+        }
+        Some((bands, count))
     }
 }
 
@@ -194,7 +265,7 @@ mod tests {
             for _ in 0..per_gear {
                 let ratio = r + (rng.next() - 0.5) * 3.0;
                 let speed = 20.0 + rng.next() * 40.0;
-                assert!(h.add_sample(ratio * speed, speed, false));
+                assert_eq!(h.add_sample(ratio * speed, speed, false, false), SampleOutcome::Accepted);
             }
         }
     }
@@ -202,10 +273,12 @@ mod tests {
     #[test]
     fn gating_rejects_unusable_samples() {
         let mut h = RatioHistogram::new();
-        assert!(!h.add_sample(4000.0, 40.0, true)); // clutch pulled
-        assert!(!h.add_sample(900.0, 40.0, false)); // engine barely turning
-        assert!(!h.add_sample(4000.0, 2.0, false)); // walking pace... ratio 2000 also out of range
-        assert!(!h.add_sample(100_000.0, 5.0, false)); // ratio above histogram range
+        use SampleOutcome::*;
+        assert_eq!(h.add_sample(4000.0, 40.0, true, false), ClutchPulled);
+        assert_eq!(h.add_sample(4000.0, 40.0, false, true), InNeutral);
+        assert_eq!(h.add_sample(900.0, 40.0, false, false), RpmLow);
+        assert_eq!(h.add_sample(1200.0, 8.0, false, false), SpeedLow);
+        assert_eq!(h.add_sample(100_000.0, 15.0, false, false), OutOfRange);
         assert_eq!(h.samples(), 0);
     }
 
@@ -213,7 +286,7 @@ mod tests {
     fn samples_land_in_the_right_bin() {
         let mut h = RatioHistogram::new();
         // ratio exactly 100.0 → bin index 80 (100 - RATIO_MIN)
-        assert!(h.add_sample(4000.0, 40.0, false));
+        assert_eq!(h.add_sample(4000.0, 40.0, false, false), SampleOutcome::Accepted);
         assert_eq!(h.hist()[80], 1);
         assert_eq!(h.samples(), 1);
     }
@@ -225,9 +298,10 @@ mod tests {
         // Scattered noise (shift transients) must not add peaks.
         let mut rng = Lcg(0xDEAD_BEEF);
         for _ in 0..30 {
-            h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false);
+            h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false, false);
         }
-        let bands = h.derive_bands().expect("six clean peaks");
+        let (bands, count) = h.derive_bands().expect("six clean peaks");
+        assert_eq!(count, NUM_GEARS);
         for (b, t) in bands.iter().zip(GEAR_RATIOS.iter()) {
             assert!(
                 (b - t).abs() / t < 0.03,
@@ -239,16 +313,21 @@ mod tests {
     }
 
     #[test]
-    fn partial_ride_yields_no_bands() {
+    fn partial_ride_yields_partial_bands() {
         let mut h = RatioHistogram::new();
         let mut rng = Lcg(0x1234_5678);
         for r in &GEAR_RATIOS[..4] {
             for _ in 0..40 {
                 let ratio = r + (rng.next() - 0.5) * 3.0;
-                h.add_sample(ratio * 30.0, 30.0, false);
+                h.add_sample(ratio * 30.0, 30.0, false, false);
             }
         }
-        assert_eq!(h.derive_bands(), None); // 4/6 gears is not a calibration
+        // Four consecutive gears from 1st: usable partial calibration.
+        let (bands, count) = h.derive_bands().expect("partial calibration");
+        assert_eq!(count, 4);
+        for (b, t) in bands[..4].iter().zip(&GEAR_RATIOS[..4]) {
+            assert!((b - t).abs() / t < 0.03, "band {b:.1} vs {t:.1}");
+        }
     }
 
     #[test]
@@ -256,7 +335,7 @@ mod tests {
         let mut h = RatioHistogram::new();
         let mut rng = Lcg(0xCAFE_F00D);
         for _ in 0..100 {
-            h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false);
+            h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false, false);
         }
         assert_eq!(h.derive_bands(), None);
     }
@@ -271,7 +350,26 @@ mod tests {
         for r in [240.0, 165.0, 125.0, 100.0, 103.0] {
             for _ in 0..40 {
                 let ratio = r + (rng.next() - 0.5) * 2.0;
-                h.add_sample(ratio * 30.0, 30.0, false);
+                h.add_sample(ratio * 30.0, 30.0, false, false);
+            }
+        }
+        // The twin collapses to one gear: a 4-gear partial calibration.
+        let (bands, count) = h.derive_bands().expect("twin should merge");
+        assert_eq!(count, 4);
+        assert!((99.0..=105.0).contains(&bands[3]), "merged band {:.1}", bands[3]);
+    }
+
+    #[test]
+    fn fake_peak_with_implausible_step_rejects_calibration() {
+        let mut h = RatioHistogram::new();
+        // Six clusters, but 100→93 is a 1.075 step — below any real gearbox's
+        // adjacent-gear spacing. One of them must be a fake peak (e.g. from
+        // clutch-slip samples), so no calibration may be produced.
+        let mut rng = Lcg(0x1234_5678);
+        for r in [240.0, 165.0, 125.0, 100.0, 93.0, 70.0] {
+            for _ in 0..40 {
+                let ratio = r + (rng.next() - 0.5) * 2.0;
+                h.add_sample(ratio * 30.0, 30.0, false, false);
             }
         }
         assert_eq!(h.derive_bands(), None);
@@ -297,14 +395,24 @@ mod tests {
     fn bin_saturates_without_overflow() {
         let mut h = RatioHistogram::new();
         h.hist[80] = u16::MAX;
-        assert!(!h.add_sample(4000.0, 40.0, false)); // bin full → dropped
+        assert_eq!(h.add_sample(4000.0, 40.0, false, false), SampleOutcome::BinFull);
         assert_eq!(h.hist()[80], u16::MAX);
+    }
+
+    #[test]
+    fn debug_mark_is_capped_and_never_a_peak() {
+        let mut h = RatioHistogram::new();
+        for _ in 0..20 {
+            h.debug_mark();
+        }
+        assert_eq!(h.hist()[0], 5); // capped
+        assert_eq!(h.derive_bands(), None); // marker alone yields no bands
     }
 
     #[test]
     fn nonempty_reports_bin_centres() {
         let mut h = RatioHistogram::new();
-        h.add_sample(4000.0, 40.0, false); // ratio 100 → bin 80, centre 100.5
+        h.add_sample(4000.0, 40.0, false, false); // ratio 100 → bin 80, centre 100.5
         let bins: Vec<_> = h.nonempty().collect();
         assert_eq!(bins, vec![(100.5, 1)]);
     }

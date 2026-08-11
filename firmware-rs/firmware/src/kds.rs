@@ -12,10 +12,10 @@ use esp_idf_hal::delay::TickType;
 use esp_idf_hal::uart::UartDriver;
 use esp_idf_hal::units::Hertz;
 use log::{info, warn};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use w230_core::kds_proto as proto;
 use w230_core::kds_proto::{
-    ParseError, REG_CLUTCH, REG_RPM, REG_SPEED, SVC_READ, SVC_READ_COMMON, SVC_READ_COMMON_OK,
+    ParseError, REG_INTERLOCK, REG_RPM, REG_SPEED, SVC_READ, SVC_READ_COMMON, SVC_READ_COMMON_OK,
     SVC_READ_IDENT, SVC_READ_IDENT_OK, SVC_READ_OK, SVC_SESSION, SVC_SESSION_KDS, SVC_SESSION_OK,
     SVC_START, SVC_START_OK,
 };
@@ -44,6 +44,10 @@ fn hex(bytes: &[u8]) -> String {
 pub struct Kds<'d> {
     uart: UartDriver<'d>,
     pub connected: bool,
+    /// When the last bus activity (our TX or the ECU's response) ended;
+    /// P3min pacing sleeps only the *remaining* quiet time, so work done
+    /// between requests (rendering, WiFi publish) comes for free.
+    last_activity: Option<Instant>,
 }
 
 impl<'d> Kds<'d> {
@@ -52,6 +56,17 @@ impl<'d> Kds<'d> {
         Self {
             uart,
             connected: false,
+            last_activity: None,
+        }
+    }
+
+    /// Sleep whatever is left of the ECU's P3min quiet window.
+    fn pace(&mut self) {
+        if let Some(t) = self.last_activity {
+            let elapsed = t.elapsed();
+            if elapsed < REQUEST_GAP {
+                std::thread::sleep(REQUEST_GAP - elapsed);
+            }
         }
     }
 
@@ -105,7 +120,7 @@ impl<'d> Kds<'d> {
 
         // The KDS tool follows up with startDiagnosticSession (10 80); without
         // it every readDataByLocalIdentifier gets 7F 21 22 (conditionsNotCorrect).
-        std::thread::sleep(REQUEST_GAP);
+        self.pace();
         if self.send_request(&[SVC_SESSION, SVC_SESSION_KDS]).is_err() {
             return false;
         }
@@ -138,7 +153,7 @@ impl<'d> Kds<'d> {
         if !self.connected {
             return None;
         }
-        std::thread::sleep(REQUEST_GAP); // respect P3min or the ECU ignores us
+        self.pace(); // respect P3min or the ECU ignores us
         self.send_request(&[SVC_READ, reg]).ok()?;
         let payload = self.read_response()?;
         match proto::positive_data(&payload, SVC_READ_OK, &[reg]) {
@@ -157,7 +172,7 @@ impl<'d> Kds<'d> {
         if !self.connected {
             return None;
         }
-        std::thread::sleep(REQUEST_GAP);
+        self.pace();
         self.send_request(&[SVC_READ_COMMON, (id >> 8) as u8, id as u8])
             .ok()?;
         let payload = self.read_response()?;
@@ -177,7 +192,7 @@ impl<'d> Kds<'d> {
         if !self.connected {
             return None;
         }
-        std::thread::sleep(REQUEST_GAP);
+        self.pace();
         self.send_request(&[SVC_READ_IDENT, id]).ok()?;
         let payload = self.read_response()?;
         proto::positive_data(&payload, SVC_READ_IDENT_OK, &[id]).map(|d| d.to_vec())
@@ -211,15 +226,22 @@ impl<'d> Kds<'d> {
         Some(speed)
     }
 
-    /// Clutch switch from reg 0x03: `Some(true)` = lever pulled, `Some(false)`
-    /// = released, `None` = no/odd reply.
-    pub fn read_clutch(&mut self) -> Option<bool> {
-        let data = self.read_register(REG_CLUTCH)?;
-        let clutch = proto::decode_clutch(&data);
-        if clutch.is_none() {
-            warn!("KDS: unexpected clutch reg value {data:02X?}");
+    /// Interlock chain (reg 0x03). `Ok(Some(true))` = neutral+clutch,
+    /// `Ok(Some(false))` = other static state, `Ok(None)` = no reply,
+    /// `Err(raw)` = undecodable value (happens while moving — black-boxed).
+    pub fn read_interlock(&mut self) -> Result<Option<bool>, u16> {
+        let Some(data) = self.read_register(REG_INTERLOCK) else {
+            return Ok(None);
+        };
+        match proto::decode_interlock(&data) {
+            Some(v) => Ok(Some(v)),
+            None => {
+                warn!("KDS: undecoded interlock value {data:02X?}");
+                let raw = ((*data.first().unwrap_or(&0) as u16) << 8)
+                    | *data.get(1).unwrap_or(&0) as u16;
+                Err(raw)
+            }
         }
-        clutch
     }
 
     // ---- transport ----
@@ -248,6 +270,7 @@ impl<'d> Kds<'d> {
         if n < frame.len() {
             warn!("KDS: short echo ({n}/{} bytes) — check wiring/pull-up", frame.len());
         }
+        self.last_activity = Some(Instant::now());
         Ok(())
     }
 
@@ -255,7 +278,9 @@ impl<'d> Kds<'d> {
     /// (bytes after fmt/tgt/src, before checksum).
     fn read_response(&mut self) -> Option<Vec<u8>> {
         let mut read = || self.read_byte_inner();
-        match proto::parse_response(&mut read) {
+        let parsed = proto::parse_response(&mut read);
+        self.last_activity = Some(Instant::now());
+        match parsed {
             Ok(frame) => {
                 if !frame.checksum_ok {
                     warn!("KDS: checksum mismatch in {}", hex(&frame.raw));

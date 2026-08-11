@@ -123,7 +123,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
  <tr><td>K-line</td><td id=link>?</td></tr>
  <tr><td>RPM</td><td id=rpm>-</td></tr>
  <tr><td>Speed</td><td id=speed>-</td></tr>
- <tr><td>Clutch</td><td id=clutch>-</td></tr>
+ <tr><td>Interlock (N+clutch)</td><td id=ecun>-</td></tr>
  <tr><td>Learned samples</td><td id=samples>-</td></tr>
  <tr><td>Ratio bands</td><td id=bands>-</td></tr>
 </table>
@@ -139,7 +139,7 @@ async function tick(){
   document.getElementById('link').innerHTML=s.link?'<span class=on>up</span>':'<span class=off>down</span>';
   document.getElementById('rpm').textContent=s.rpm??'-';
   document.getElementById('speed').textContent=s.speed??'-';
-  document.getElementById('clutch').textContent=s.clutch==null?'-':(s.clutch?'pulled':'out');
+  document.getElementById('ecun').textContent=s.ecuNeutral==null?'-':(s.ecuNeutral?'N+clutch':'other');
   document.getElementById('samples').textContent=s.samples;
   document.getElementById('bands').textContent=s.bands?s.bands.join(' '):'not calibrated';
  }catch(e){document.getElementById('link').textContent='?'}

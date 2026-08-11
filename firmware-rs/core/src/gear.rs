@@ -14,7 +14,24 @@ pub const NUM_GEARS: usize = 6; // W230 is a 6-speed
 const MIN_SPEED: f32 = 3.0; // below this the ratio is meaningless
 const MIN_RPM: f32 = 600.0;
 const DEBOUNCE_N: u8 = 3; // consecutive samples before committing
+/// A confident classification (very close to a band centre) commits faster.
+const DEBOUNCE_CONFIDENT: u8 = 2;
 const BAND_TOL: f32 = 0.14; // ±14% window around a band centre
+/// Within this of a band centre the classification counts as confident.
+const CONFIDENT_TOL: f32 = 0.05;
+/// Speed below this counts as standing still.
+const STANDSTILL_SPEED: f32 = 1.0;
+/// Consecutive standstill samples after which a held gear digit decays to the
+/// dash: stopped with the clutch in, the rider may downshift without the box
+/// ever telling us, so a stale digit becomes a lie after a few seconds.
+const STANDSTILL_FORGET: u8 = 8;
+
+/// Factory-provisional ratio bands (rpm per km/h), computed from Kawasaki's
+/// official 2026 W230 spec: primary 2.871, final 2.714, gears 3.000/2.067/
+/// 1.556/1.261/1.040/0.852, rear tire 110/90-17 (1.98 m rollout). Used until
+/// ride-learned bands replace them (which also absorb speedo optimism and
+/// tire wear — expect learned values a few percent off these).
+pub const FACTORY_BANDS: [f32; NUM_GEARS] = [196.9, 135.7, 102.1, 82.8, 68.3, 55.9];
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Gear {
@@ -37,12 +54,15 @@ pub struct GearInputs {
 }
 
 pub struct GearEstimator {
-    /// Learned ratio bands; `None` until a calibration ride has covered all
-    /// gears — the classifier stays silent rather than guess from placeholders.
-    bands: Option<[f32; NUM_GEARS]>,
+    /// Learned ratio bands and how many are valid (partial calibration maps
+    /// the highest ratio to 1st gear); `None` until a calibration ride —
+    /// the classifier stays silent rather than guess from placeholders.
+    bands: Option<([f32; NUM_GEARS], usize)>,
     gear: Gear,
     candidate: Gear,
+    candidate_confident: bool,
     stable: u8,
+    standstill: u8,
 }
 
 impl Default for GearEstimator {
@@ -57,20 +77,24 @@ impl GearEstimator {
             bands: None,
             gear: Gear::Unknown,
             candidate: Gear::Unknown,
+            candidate_confident: false,
             stable: 0,
+            standstill: 0,
         }
     }
 
-    pub fn set_bands(&mut self, bands: [f32; NUM_GEARS]) {
-        self.bands = Some(bands);
+    pub fn set_bands(&mut self, bands: [f32; NUM_GEARS], count: usize) {
+        assert!((1..=NUM_GEARS).contains(&count));
+        self.bands = Some((bands, count));
     }
 
     pub fn clear_bands(&mut self) {
         self.bands = None;
     }
 
-    pub fn bands(&self) -> Option<[f32; NUM_GEARS]> {
-        self.bands
+    /// The valid learned bands (length = calibrated gear count).
+    pub fn bands(&self) -> Option<&[f32]> {
+        self.bands.as_ref().map(|(b, c)| &b[..*c])
     }
 
     /// Feed the latest sample; returns the (debounced) gear to display.
@@ -85,6 +109,7 @@ impl GearEstimator {
             self.gear = Gear::Neutral;
             self.candidate = Gear::Neutral;
             self.stable = DEBOUNCE_N;
+            self.standstill = 0;
             return self.gear;
         }
         if self.gear == Gear::Neutral {
@@ -94,31 +119,56 @@ impl GearEstimator {
             self.stable = 1;
         }
 
-        let raw = if let Some(g) = inputs.gear_reg.filter(|g| *g as usize <= NUM_GEARS) {
+        // Standstill decay: a held digit becomes untrustworthy after a few
+        // seconds stopped (clutch-in downshifts are invisible to us).
+        match inputs.speed {
+            Some(s) if s < STANDSTILL_SPEED && self.gear != Gear::Unknown => {
+                self.standstill = self.standstill.saturating_add(1);
+                if self.standstill >= STANDSTILL_FORGET {
+                    info!("GEAR: {:?} -> Unknown (standing still)", self.gear);
+                    self.gear = Gear::Unknown;
+                    self.candidate = Gear::Unknown;
+                    self.standstill = 0;
+                }
+            }
+            Some(_) => self.standstill = 0,
+            None => {}
+        }
+
+        let (raw, confident) = if let Some(g) = inputs.gear_reg.filter(|g| *g as usize <= NUM_GEARS)
+        {
             // Plausible KDS gear register (0 = neutral per ECU map).
             if g == 0 {
-                Gear::Neutral
+                (Gear::Neutral, true)
             } else {
-                Gear::G(g)
+                (Gear::G(g), true)
             }
         } else if inputs.clutch_pulled {
             // Engine decoupled — the ratio says nothing; hold the last gear.
-            Gear::Unknown
+            (Gear::Unknown, false)
         } else {
             self.classify(inputs.rpm, inputs.speed)
         };
 
-        // Debounce so a transient sample doesn't flicker the display.
+        // Debounce so a transient sample doesn't flicker the display; a
+        // confident classification (ratio near a band centre) commits sooner.
         if raw == self.candidate {
             self.stable = self.stable.saturating_add(1);
+            self.candidate_confident = confident;
         } else {
             self.candidate = raw;
+            self.candidate_confident = confident;
             self.stable = 1;
         }
+        let needed = if self.candidate_confident {
+            DEBOUNCE_CONFIDENT
+        } else {
+            DEBOUNCE_N
+        };
         // Unknown never displaces a known gear here (coasting clutch-in
         // mid-ride shouldn't blank the digit); stale "N" is impossible — the
         // switch path above commits and drops N without debounce.
-        if self.stable >= DEBOUNCE_N && self.candidate != Gear::Unknown {
+        if self.stable >= needed && self.candidate != Gear::Unknown {
             if self.gear != self.candidate {
                 info!("GEAR: {:?} -> {:?}", self.gear, self.candidate);
             }
@@ -127,27 +177,44 @@ impl GearEstimator {
         self.gear
     }
 
-    fn classify(&self, rpm: Option<f32>, speed: Option<f32>) -> Gear {
-        let Some(bands) = &self.bands else {
-            return Gear::Unknown; // not calibrated yet
+    /// Classify a ratio to the nearest band; the bool is the confidence
+    /// (within [`CONFIDENT_TOL`] of the band centre).
+    fn classify(&self, rpm: Option<f32>, speed: Option<f32>) -> (Gear, bool) {
+        let Some((bands, count)) = &self.bands else {
+            return (Gear::Unknown, false); // not calibrated yet
         };
         let (rpm, speed) = match (rpm, speed) {
             (Some(r), Some(s)) if r >= MIN_RPM && s >= MIN_SPEED => (r, s),
-            _ => return Gear::Unknown,
+            _ => return (Gear::Unknown, false),
         };
         let ratio = rpm / speed;
         let mut best: Option<(usize, f32)> = None;
-        for (i, c) in bands.iter().enumerate() {
+        for (i, c) in bands[..*count].iter().enumerate() {
             let err = (ratio - c).abs() / c;
             if best.map_or(true, |(_, be)| err < be) {
                 best = Some((i, err));
             }
         }
         match best {
-            Some((i, err)) if err <= BAND_TOL => Gear::G(i as u8 + 1),
-            _ => Gear::Unknown,
+            Some((i, err)) if err <= BAND_TOL => (Gear::G(i as u8 + 1), err <= CONFIDENT_TOL),
+            _ => (Gear::Unknown, false),
         }
     }
+}
+
+/// First-order time alignment for the rpm/speed pair: the two registers are
+/// read ~a hundred ms apart, so under acceleration the ratio skews. Given the
+/// previous cycle's rpm reading `dt_ms` ago, estimate rpm `lead_ms` after the
+/// current reading (i.e. at the moment the speed byte was captured). The
+/// correction is clamped to ±10% and disabled for stale history.
+pub fn time_align_rpm(rpm_now: f32, rpm_prev: f32, dt_ms: f32, lead_ms: f32) -> f32 {
+    if !(1.0..=2000.0).contains(&dt_ms) || lead_ms <= 0.0 {
+        return rpm_now;
+    }
+    let slope = (rpm_now - rpm_prev) / dt_ms; // rpm per ms
+    let corrected = rpm_now + slope * lead_ms;
+    let limit = rpm_now * 0.10;
+    corrected.clamp(rpm_now - limit, rpm_now + limit)
 }
 
 #[cfg(test)]
@@ -158,7 +225,7 @@ mod tests {
 
     fn calibrated() -> GearEstimator {
         let mut e = GearEstimator::new();
-        e.set_bands(BANDS);
+        e.set_bands(BANDS, NUM_GEARS);
         e
     }
 
@@ -193,12 +260,51 @@ mod tests {
     }
 
     #[test]
-    fn ratio_classification_needs_debounce() {
+    fn confident_ratio_commits_in_two_samples() {
         let mut e = calibrated();
-        // 4000 rpm / 40 km/h = ratio 100 → 4th gear, but only after 3 samples.
-        assert_eq!(e.update(&riding(4000.0, 40.0)), Gear::Unknown);
+        // 4000 rpm / 40 km/h = ratio 100, dead on the 4th-gear band centre.
         assert_eq!(e.update(&riding(4000.0, 40.0)), Gear::Unknown);
         assert_eq!(e.update(&riding(4000.0, 40.0)), Gear::G(4));
+    }
+
+    #[test]
+    fn marginal_ratio_needs_full_debounce() {
+        let mut e = calibrated();
+        // Ratio 109.6: within the 4th-gear ±14% window but 9.6% off centre —
+        // classified, yet not confident → three samples.
+        assert_eq!(e.update(&riding(4000.0, 36.5)), Gear::Unknown);
+        assert_eq!(e.update(&riding(4000.0, 36.5)), Gear::Unknown);
+        assert_eq!(e.update(&riding(4000.0, 36.5)), Gear::G(4));
+    }
+
+    #[test]
+    fn held_gear_decays_to_unknown_at_standstill() {
+        let mut e = calibrated();
+        for _ in 0..3 {
+            e.update(&riding(4000.0, 40.0));
+        }
+        assert_eq!(e.update(&riding(4000.0, 40.0)), Gear::G(4));
+        // Stopped in gear, clutch in, idling: digit must decay, not persist.
+        let mut stopped = riding(1300.0, 0.0);
+        stopped.clutch_pulled = true;
+        for _ in 0..7 {
+            assert_eq!(e.update(&stopped), Gear::G(4)); // grace period holds
+        }
+        assert_eq!(e.update(&stopped), Gear::Unknown); // 8th sample: decay
+    }
+
+    #[test]
+    fn time_align_rpm_corrects_acceleration_skew() {
+        // Steady state: no correction.
+        assert_eq!(time_align_rpm(4000.0, 4000.0, 350.0, 130.0), 4000.0);
+        // Accelerating 1000→1100 rpm over 350ms, speed read 130ms later:
+        // expect ~+37 rpm.
+        let v = time_align_rpm(1100.0, 1000.0, 350.0, 130.0);
+        assert!((v - 1137.0).abs() < 1.0, "got {v}");
+        // Absurd slope clamps at ±10%.
+        assert_eq!(time_align_rpm(1000.0, 100.0, 10.0, 130.0), 1100.0);
+        // Stale history disables the correction.
+        assert_eq!(time_align_rpm(1100.0, 1000.0, 5000.0, 130.0), 1100.0);
     }
 
     #[test]
@@ -251,6 +357,23 @@ mod tests {
         let mut e = calibrated();
         for _ in 0..5 {
             assert_eq!(e.update(&riding(1200.0, 0.0)), Gear::Unknown);
+        }
+    }
+
+    #[test]
+    fn partial_calibration_classifies_only_learned_gears() {
+        let mut e = GearEstimator::new();
+        e.set_bands(BANDS, 2); // only 1st (240) and 2nd (165) learned
+        // Riding at 2nd-gear ratio: classified.
+        for _ in 0..3 {
+            e.update(&riding(3300.0, 20.0)); // ratio 165
+        }
+        assert_eq!(e.update(&riding(3300.0, 20.0)), Gear::G(2));
+        // Riding at what would be 4th (ratio 100): outside the learned set.
+        let mut e2 = GearEstimator::new();
+        e2.set_bands(BANDS, 2);
+        for _ in 0..5 {
+            assert_eq!(e2.update(&riding(4000.0, 40.0)), Gear::Unknown);
         }
     }
 
