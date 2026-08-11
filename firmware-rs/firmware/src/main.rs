@@ -322,10 +322,13 @@ fn main() -> anyhow::Result<()> {
             if cycle % INTERLOCK_EVERY_N_CYCLES == 0 {
                 match kds.read_interlock() {
                     Ok(Some(v)) => interlock = Some(v),
-                    Ok(None) => {}
+                    // A failed/refused read means UNKNOWN — never hold a stale
+                    // "neutral+clutch" latch (the ECU refuses reg 0x03 while
+                    // moving; a launch-time latch once blocked a whole ride).
+                    Ok(None) => interlock = None,
                     Err(raw) => {
                         learner.note_interlock_odd(raw);
-                        interlock = None; // unknown state
+                        interlock = None;
                     }
                 }
             }
