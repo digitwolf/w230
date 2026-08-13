@@ -402,11 +402,12 @@ mod tests {
             e.update(&riding(2500.0, 8.0));
         }
         assert_eq!(e.update(&riding(2500.0, 8.0)), Gear::G(1));
-        // But idling along at low speed in a higher gear must NOT read as 1st:
-        // 850 rpm at 6 km/h → ratio 142, below the launch signature.
+        // But a low-speed ratio in the dead zone BELOW the launch signature
+        // must stay unknown: 1170 rpm at 6 km/h → ratio 195 (between the 165
+        // band's +14% and the launch floor of 240·0.86 ≈ 206).
         let mut e2 = calibrated();
         for _ in 0..5 {
-            assert_eq!(e2.update(&riding(850.0, 6.0)), Gear::Unknown);
+            assert_eq!(e2.update(&riding(1170.0, 6.0)), Gear::Unknown);
         }
     }
 
