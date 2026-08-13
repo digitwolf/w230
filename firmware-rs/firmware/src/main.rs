@@ -3,8 +3,9 @@
 //! Reads the KDS diagnostic K-line through a LINTTL3 (TJA1021/SIT1021T)
 //! TTL-UART<->LIN module and shows the current gear on the 5x5 LED matrix:
 //! green N, cyan 1-6, dim red dash when unknown, all red = no link.
-//! Neutral comes from the switch wire on G23 (reg 0x03 is the neutral+clutch
-//! interlock chain, unusable as a neutral or clutch source); gears 1-6 come
+//! Neutral comes from the switch wire on G23 and nowhere else (ECU reg 0x03
+//! reads 00 00 whenever the bike is MOVING as well as during neutral+clutch —
+//! useless for any gating; kept as dashboard telemetry only). Gears 1-6 come
 //! from the RPM/speed ratio (factory-preset bands, refined by ride learning).
 //!
 //! Wiring (module pins per vendor sheet — note TX/RX are named from the
@@ -342,11 +343,11 @@ fn main() -> anyhow::Result<()> {
                 learner.save(); // key-off is how rides end — don't lose the tail
             } else {
                 link_up = true;
-                // Learning gates: the G23 neutral wire, plus the interlock
-                // when it definitively reads neutral+clutch. No clutch-only
-                // source exists; shift transients are absorbed by the
+                // Learning gate: the G23 neutral wire ONLY. Reg 0x03 reads
+                // 00 00 whenever moving, so any gating role for it blocks all
+                // ride samples; shift transients are absorbed by the
                 // histogram's peak-mass filters.
-                let neutral_now = neutral.is_low() || interlock == Some(true);
+                let neutral_now = neutral.is_low();
                 if let (Some(r), Some(s)) = (rpm_aligned, speed) {
                     learner.add_sample(r, s, false, neutral_now);
                 }
@@ -366,14 +367,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Neutral: the G23 switch wire (LOW = neutral). The interlock's
-        // definitive neutral+clutch state also implies neutral.
+        // Neutral: the G23 switch wire only (LOW = neutral).
         let pin_low = neutral.is_low();
         if pin_low != neutral_was_active {
             info!("NEUTRAL PIN: {}", if pin_low { "LOW (neutral)" } else { "HIGH (in gear)" });
             neutral_was_active = pin_low;
         }
-        let neutral_active = pin_low || interlock == Some(true);
+        let neutral_active = pin_low;
 
         let mut gear = estimator.update(&GearInputs {
             rpm: rpm_aligned,
