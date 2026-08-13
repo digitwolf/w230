@@ -25,6 +25,10 @@ const STANDSTILL_SPEED: f32 = 1.0;
 /// dash: stopped with the clutch in, the rider may downshift without the box
 /// ever telling us, so a stale digit becomes a lie after a few seconds.
 const STANDSTILL_FORGET: u8 = 8;
+/// Launch detection: below this speed, a ratio at-or-above the 1st-gear band
+/// can only be a slipping clutch on a launch — show 1st before hookup.
+const LAUNCH_MAX_SPEED: f32 = 12.0;
+const LAUNCH_MIN_RPM: f32 = 1100.0;
 
 /// Factory-provisional ratio bands (rpm per km/h), computed from Kawasaki's
 /// official 2026 W230 spec: primary 2.871, final 2.714, gears 3.000/2.067/
@@ -197,7 +201,20 @@ impl GearEstimator {
         }
         match best {
             Some((i, err)) if err <= BAND_TOL => (Gear::G(i as u8 + 1), err <= CONFIDENT_TOL),
-            _ => (Gear::Unknown, false),
+            _ => {
+                // Launch: slipping the clutch from a stop pushes the ratio
+                // ABOVE the 1st-gear band while speed is still walking pace.
+                // No other state produces that signature, so show 1st early
+                // rather than a dash until hookup (~10 km/h).
+                if speed <= LAUNCH_MAX_SPEED
+                    && rpm >= LAUNCH_MIN_RPM
+                    && ratio >= bands[0] * (1.0 - BAND_TOL)
+                {
+                    (Gear::G(1), false)
+                } else {
+                    (Gear::Unknown, false)
+                }
+            }
         }
     }
 }
@@ -374,6 +391,22 @@ mod tests {
         e2.set_bands(BANDS, 2);
         for _ in 0..5 {
             assert_eq!(e2.update(&riding(4000.0, 40.0)), Gear::Unknown);
+        }
+    }
+
+    #[test]
+    fn launch_slip_shows_first_gear_early() {
+        let mut e = calibrated();
+        // Pulling away: 2500 rpm at 8 km/h → ratio 312, far above 1st's 240.
+        for _ in 0..3 {
+            e.update(&riding(2500.0, 8.0));
+        }
+        assert_eq!(e.update(&riding(2500.0, 8.0)), Gear::G(1));
+        // But idling along at low speed in a higher gear must NOT read as 1st:
+        // 850 rpm at 6 km/h → ratio 142, below the launch signature.
+        let mut e2 = calibrated();
+        for _ in 0..5 {
+            assert_eq!(e2.update(&riding(850.0, 6.0)), Gear::Unknown);
         }
     }
 
