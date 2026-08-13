@@ -21,7 +21,7 @@ use w230_core::kds_proto::{
 };
 
 const RSP_TIMEOUT: Duration = Duration::from_millis(250);
-const TX_BYTE_GAP: Duration = Duration::from_millis(5);
+const TX_BYTE_GAP: Duration = Duration::from_millis(2);
 /// ISO 14230 P3min: quiet time the ECU needs between its response and our next
 /// request. Requests sent sooner are silently ignored (seen on the W230).
 const REQUEST_GAP: Duration = Duration::from_millis(60);

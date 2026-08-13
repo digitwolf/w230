@@ -32,12 +32,13 @@ use kds::Kds;
 use learn_store::RatioLearner;
 use log::{info, warn};
 use smart_leds::SmartLedsWrite;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use w230_core::display;
 use w230_core::gear::{Gear, GearEstimator, GearInputs};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
 const BRIGHTNESS_STEPS: [u8; 3] = [40, 120, 255];
 // Short interval: on the bike, key-off cuts our power instantly — anything
@@ -49,7 +50,7 @@ const LEARN_SAVE_INTERVAL: Duration = Duration::from_secs(3);
 const LEARN_RESET_HOLD: Duration = Duration::from_secs(3);
 /// The interlock register changes on human timescales — reading it every Nth
 /// cycle buys ~130 ms on the other cycles.
-const INTERLOCK_EVERY_N_CYCLES: u32 = 3;
+const INTERLOCK_EVERY_N_CYCLES: u32 = 8;
 
 /// Gear-register hunt: scan all local identifiers once after connecting, then
 /// keep re-reading the supported ones and log every value change. Shift
@@ -61,6 +62,11 @@ const DIAG_SCAN: bool = false;
 /// `DEMO_STEP`. TEMPORARY — turn off for real use.
 const DEMO_MODE: bool = false;
 const DEMO_STEP: Duration = Duration::from_secs(15);
+
+/// WiFi softAP + HTTP dashboard. Diagnostic tooling only: WiFi's interrupt
+/// load lives on core 0 and its TX bursts are the prime suspect for WS2812
+/// glitch pixels; leave off so both cores serve signal processing/display.
+const WIFI_DIAG: bool = false;
 
 /// Deep scan: probe services 0x1A (ECU identification) and 0x22 (common
 /// identifiers 0x0000-0x0FFF, ~10 min), then change-watch everything found.
@@ -78,7 +84,7 @@ fn neutral_tick(
     neutral_low: bool,
     neutral_was: &mut bool,
     estimator: &mut GearEstimator,
-    leds: &mut Ws2812Esp32Rmt,
+    led_tx: &mpsc::SyncSender<[rgb::RGB8; 25]>,
     link_up: bool,
     brightness: u8,
 ) {
@@ -95,10 +101,7 @@ fn neutral_tick(
         ..Default::default()
     });
     if !DEMO_MODE {
-        let frame = display::render(gear, link_up, brightness, false);
-        if let Err(e) = leds.write(frame.into_iter()) {
-            warn!("LED write failed: {e}");
-        }
+        let _ = led_tx.try_send(display::render(gear, link_up, brightness, false));
     }
 }
 
@@ -109,8 +112,40 @@ fn main() -> anyhow::Result<()> {
 
     let p = Peripherals::take()?;
 
-    // --- LED matrix: 25x WS2812 on GPIO27 ---
-    let mut leds = Ws2812Esp32Rmt::new(p.rmt.channel0, p.pins.gpio27)?;
+    // --- LED matrix: 25x WS2812 on GPIO27, driven from CPU core 1 ---
+    // WiFi interrupts live on core 0 and preempt the RMT refill ISR there,
+    // corrupting WS2812 timing (random glitch pixels). Creating the RMT
+    // driver inside a core-1-pinned thread allocates its ISR on core 1,
+    // where nothing competes with it.
+    let (led_tx, led_rx) = mpsc::sync_channel::<[rgb::RGB8; 25]>(4);
+    {
+        let rmt = p.rmt.channel0;
+        let led_pin = p.pins.gpio27;
+        esp_idf_hal::task::thread::ThreadSpawnConfiguration {
+            name: Some(b"led\0"),
+            pin_to_core: Some(esp_idf_hal::cpu::Core::Core1),
+            stack_size: 4096,
+            ..Default::default()
+        }
+        .set()?;
+        std::thread::Builder::new()
+            .stack_size(4096)
+            .spawn(move || {
+                let mut leds = match Ws2812Esp32Rmt::new(rmt, led_pin) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        warn!("LED driver init failed: {e}");
+                        return;
+                    }
+                };
+                while let Ok(frame) = led_rx.recv() {
+                    if let Err(e) = leds.write(frame.into_iter()) {
+                        warn!("LED write failed: {e}");
+                    }
+                }
+            })?;
+        esp_idf_hal::task::thread::ThreadSpawnConfiguration::default().set()?;
+    }
 
     // --- Button (GPIO39, active low, external pull-up on board) ---
     let button = PinDriver::input(p.pins.gpio39)?;
@@ -145,9 +180,14 @@ fn main() -> anyhow::Result<()> {
     let mut learner = RatioLearner::new(nvs);
     learner.dump(); // post-ride diagnostic: full histogram in the boot log
 
-    // --- WiFi hotspot + HTTP diagnostic dashboard ---
-    let sysloop = EspSystemEventLoop::take()?;
-    let webdiag = web::start(p.modem, sysloop, nvs_part)?;
+    // --- WiFi hotspot + HTTP diagnostic dashboard (compile-gated) ---
+    let webdiag = if WIFI_DIAG {
+        let sysloop = EspSystemEventLoop::take()?;
+        Some(web::start(p.modem, sysloop, nvs_part)?)
+    } else {
+        info!("WiFi diagnostics disabled — full CPU dedicated to gear display");
+        None
+    };
 
     let mut estimator = GearEstimator::new();
     // Factory-provisional bands: digits work with zero calibration; learned
@@ -294,7 +334,7 @@ fn main() -> anyhow::Result<()> {
                 neutral.is_low(),
                 &mut neutral_was_active,
                 &mut estimator,
-                &mut leds,
+                &led_tx,
                 true,
                 brightness,
             );
@@ -316,7 +356,7 @@ fn main() -> anyhow::Result<()> {
                 neutral.is_low(),
                 &mut neutral_was_active,
                 &mut estimator,
-                &mut leds,
+                &led_tx,
                 true,
                 brightness,
             );
@@ -403,22 +443,19 @@ fn main() -> anyhow::Result<()> {
             brightness,
             Instant::now() < learn_flash_until,
         );
-        // Rewrite on change, plus a ~1s periodic refresh so a WiFi-glitched
-        // pixel can never survive longer than a second.
-        if last_frame != Some(frame) || cycle % 4 == 0 {
-            if let Err(e) = leds.write(frame.into_iter()) {
-                warn!("LED write failed: {e}");
-            }
+        // Rewrite on change, plus a periodic refresh as glitch insurance.
+        if last_frame != Some(frame) || cycle % 8 == 0 {
+            let _ = led_tx.try_send(frame);
             last_frame = Some(frame);
         }
 
         // Publish to the WiFi dashboard; act on a requested calibration wipe.
-        if webdiag.clear_req.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            learner.clear();
-            estimator.clear_bands();
-            info!("LEARN: calibration wiped (web request)");
-        }
-        {
+        if let Some(webdiag) = &webdiag {
+            if webdiag.clear_req.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                learner.clear();
+                estimator.clear_bands();
+                info!("LEARN: calibration wiped (web request)");
+            }
             let mut s = webdiag.shared.lock().unwrap();
             s.link_up = link_up;
             s.gear = Some(gear);
