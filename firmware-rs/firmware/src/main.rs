@@ -153,8 +153,8 @@ fn main() -> anyhow::Result<()> {
     // Factory-provisional bands: digits work with zero calibration; learned
     // bands replace them below as soon as riding data yields peaks.
     estimator.set_bands(w230_core::gear::FACTORY_BANDS, w230_core::gear::NUM_GEARS);
-    if let Some((bands, count)) = learner.derive_bands() {
-        estimator.set_bands(bands, count);
+    if let Some((bands, _)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
+        estimator.set_bands(bands, w230_core::gear::NUM_GEARS);
     }
 
     let demo_start = Instant::now();
@@ -361,8 +361,8 @@ fn main() -> anyhow::Result<()> {
             last_learn_save = Instant::now();
             if learner.save() {
                 learn_flash_until = Instant::now() + Duration::from_millis(800);
-                if let Some((bands, count)) = learner.derive_bands() {
-                    estimator.set_bands(bands, count);
+                if let Some((bands, _)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
+                    estimator.set_bands(bands, w230_core::gear::NUM_GEARS);
                 }
             }
         }
@@ -403,7 +403,9 @@ fn main() -> anyhow::Result<()> {
             brightness,
             Instant::now() < learn_flash_until,
         );
-        if last_frame != Some(frame) {
+        // Rewrite on change, plus a ~1s periodic refresh so a WiFi-glitched
+        // pixel can never survive longer than a second.
+        if last_frame != Some(frame) || cycle % 4 == 0 {
             if let Err(e) = leds.write(frame.into_iter()) {
                 warn!("LED write failed: {e}");
             }

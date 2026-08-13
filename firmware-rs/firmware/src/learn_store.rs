@@ -244,8 +244,8 @@ impl RatioLearner {
         }
     }
 
-    pub fn derive_bands(&self) -> Option<([f32; NUM_GEARS], usize)> {
-        self.hist.derive_bands()
+    pub fn derive_bands(&self, reference: &[f32; NUM_GEARS]) -> Option<([f32; NUM_GEARS], usize)> {
+        self.hist.derive_bands(reference)
     }
 
     pub fn hist(&self) -> &[u16; BINS] {

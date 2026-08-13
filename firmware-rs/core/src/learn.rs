@@ -25,12 +25,10 @@ const MIN_SPEED: f32 = 10.0;
 const MIN_PEAK_MASS: u32 = 15;
 /// Two peaks closer than this (relative ratio) are one gear, keep the bigger.
 const PEAK_SEPARATION: f32 = 0.06;
-/// Adjacent learned bands must step by a plausible gearbox factor; anything
-/// outside means a fake peak got in (or a gear was skipped during a partial
-/// ride), and the calibration is rejected whole.
-const STEP_MIN: f32 = 1.08;
-const STEP_MAX: f32 = 1.60;
-/// Fewest peaks that make a usable partial calibration.
+/// A learned peak must sit within this of a factory band to refine that gear;
+/// bands are ~20% apart, so ±10% cannot straddle two gears.
+const ANCHOR_TOL: f32 = 0.10;
+/// Fewest anchored peaks that make a usable refinement.
 const MIN_PEAKS: usize = 2;
 
 /// Why a sample was or wasn't counted — the firmware persists per-ride
@@ -162,12 +160,11 @@ impl RatioHistogram {
             .map(|(i, c)| (RATIO_MIN + i as f32 + 0.5, *c))
     }
 
-    /// Peak-detect the histogram into per-gear ratio bands. Returns the bands
-    /// plus how many are valid (`MIN_PEAKS..=NUM_GEARS`). A partial result
-    /// assumes the highest-ratio peak is 1st gear — i.e. the rider covered
-    /// consecutive gears from 1st; skipped gears fail the step-sanity check
-    /// rather than mislabel.
-    pub fn derive_bands(&self) -> Option<([f32; NUM_GEARS], usize)> {
+    /// Peak-detect the histogram and refine `reference` (factory) bands with
+    /// the learned peaks: each peak within [`ANCHOR_TOL`] of a factory band
+    /// replaces that gear's value. Returns the full band set plus how many
+    /// gears were refined; `None` until at least [`MIN_PEAKS`] gears anchor.
+    pub fn derive_bands(&self, reference: &[f32; NUM_GEARS]) -> Option<([f32; NUM_GEARS], usize)> {
         let h = |j: isize| -> u32 {
             if (0..BINS as isize).contains(&j) {
                 self.hist[j as usize] as u32
@@ -206,41 +203,39 @@ impl RatioHistogram {
         for (r, m) in &accepted {
             info!("LEARN: peak ratio {r:.1} (mass {m})");
         }
-        if accepted.len() < MIN_PEAKS {
-            info!(
-                "LEARN: only {}/{} gear peaks — ride steadily in at least two gears",
-                accepted.len(),
-                NUM_GEARS
-            );
-            return None;
-        }
-        accepted.truncate(NUM_GEARS);
-        // Highest ratio = shortest gearing = 1st.
-        accepted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        let count = accepted.len();
-        let mut bands = [0.0f32; NUM_GEARS];
-        for (i, (r, _)) in accepted.iter().enumerate() {
-            bands[i] = *r;
-        }
-        // Sanity: adjacent gears step by a plausible factor. A step outside
-        // the window means a fake peak got in, or a partial ride skipped a
-        // gear — reject rather than mislabel.
-        for w in bands[..count].windows(2) {
-            let step = w[0] / w[1];
-            if !(STEP_MIN..=STEP_MAX).contains(&step) {
-                info!(
-                    "LEARN: implausible gear step {:.2} between ratios {:.1} and {:.1} — rejecting calibration",
-                    step, w[0], w[1]
-                );
-                return None;
+        // Anchor each peak to its nearest reference (factory) band: a peak
+        // near a band refines that gear; peaks matching nothing are noise.
+        // No ordering assumption — riding only 3rd and 4th refines 3rd and
+        // 4th, never mislabels them as 1st and 2nd.
+        let mut bands = *reference;
+        let mut matched_mass = [0u32; NUM_GEARS];
+        let mut learned = 0usize;
+        for (r, m) in accepted {
+            let (slot, err) = reference
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i, (r - c).abs() / c))
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap();
+            if err > ANCHOR_TOL {
+                info!("LEARN: peak ratio {r:.1} matches no gear (nearest err {:.0}%) — ignored", err * 100.0);
+                continue;
+            }
+            if m > matched_mass[slot] {
+                if matched_mass[slot] == 0 {
+                    learned += 1;
+                }
+                matched_mass[slot] = m;
+                bands[slot] = r;
+                info!("LEARN: gear {} refined to ratio {r:.1} (mass {m})", slot + 1);
             }
         }
-        if count < NUM_GEARS {
-            info!("LEARN: partial calibration {count}/{NUM_GEARS} (assumes 1st..{count}), bands {:.1?}", &bands[..count]);
-        } else {
-            info!("LEARN: calibration complete, bands {bands:.1?}");
+        if learned < MIN_PEAKS {
+            info!("LEARN: only {learned} anchored gear peaks — keeping factory bands until at least {MIN_PEAKS}");
+            return None;
         }
-        Some((bands, count))
+        info!("LEARN: {learned}/{NUM_GEARS} gears refined, bands {bands:.1?}");
+        Some((bands, learned))
     }
 }
 
@@ -258,6 +253,8 @@ mod tests {
     }
 
     const GEAR_RATIOS: [f32; NUM_GEARS] = [240.0, 165.0, 125.0, 100.0, 82.0, 70.0];
+    /// A slightly-off factory reference: learned peaks must still anchor.
+    const REFERENCE: [f32; NUM_GEARS] = [232.0, 160.0, 121.0, 97.0, 80.0, 68.0];
 
     fn synthetic_ride(h: &mut RatioHistogram, per_gear: usize) {
         let mut rng = Lcg(0x1234_5678);
@@ -300,7 +297,7 @@ mod tests {
         for _ in 0..30 {
             h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false, false);
         }
-        let (bands, count) = h.derive_bands().expect("six clean peaks");
+        let (bands, count) = h.derive_bands(&REFERENCE).expect("six clean peaks");
         assert_eq!(count, NUM_GEARS);
         for (b, t) in bands.iter().zip(GEAR_RATIOS.iter()) {
             assert!(
@@ -313,21 +310,25 @@ mod tests {
     }
 
     #[test]
-    fn partial_ride_yields_partial_bands() {
+    fn cruising_gears_refine_their_own_slots_not_first() {
+        // The field bug: riding only 3rd and 4th must refine gears 3 and 4 —
+        // never be mislabelled as 1st and 2nd.
         let mut h = RatioHistogram::new();
         let mut rng = Lcg(0x1234_5678);
-        for r in &GEAR_RATIOS[..4] {
+        for r in [GEAR_RATIOS[2], GEAR_RATIOS[3]] {
             for _ in 0..40 {
                 let ratio = r + (rng.next() - 0.5) * 3.0;
                 h.add_sample(ratio * 30.0, 30.0, false, false);
             }
         }
-        // Four consecutive gears from 1st: usable partial calibration.
-        let (bands, count) = h.derive_bands().expect("partial calibration");
-        assert_eq!(count, 4);
-        for (b, t) in bands[..4].iter().zip(&GEAR_RATIOS[..4]) {
-            assert!((b - t).abs() / t < 0.03, "band {b:.1} vs {t:.1}");
-        }
+        let (bands, count) = h.derive_bands(&REFERENCE).expect("two anchored peaks");
+        assert_eq!(count, 2);
+        assert!((bands[2] - GEAR_RATIOS[2]).abs() / GEAR_RATIOS[2] < 0.03);
+        assert!((bands[3] - GEAR_RATIOS[3]).abs() / GEAR_RATIOS[3] < 0.03);
+        // Unridden gears keep the factory values.
+        assert_eq!(bands[0], REFERENCE[0]);
+        assert_eq!(bands[1], REFERENCE[1]);
+        assert_eq!(bands[5], REFERENCE[5]);
     }
 
     #[test]
@@ -337,7 +338,7 @@ mod tests {
         for _ in 0..100 {
             h.add_sample((20.0 + rng.next() * 280.0) * 30.0, 30.0, false, false);
         }
-        assert_eq!(h.derive_bands(), None);
+        assert_eq!(h.derive_bands(&REFERENCE), None);
     }
 
     #[test]
@@ -353,26 +354,31 @@ mod tests {
                 h.add_sample(ratio * 30.0, 30.0, false, false);
             }
         }
-        // The twin collapses to one gear: a 4-gear partial calibration.
-        let (bands, count) = h.derive_bands().expect("twin should merge");
+        // The twin collapses to one gear: four gears refined.
+        let (bands, count) = h.derive_bands(&REFERENCE).expect("twin should merge");
         assert_eq!(count, 4);
         assert!((99.0..=105.0).contains(&bands[3]), "merged band {:.1}", bands[3]);
     }
 
     #[test]
-    fn fake_peak_with_implausible_step_rejects_calibration() {
+    fn weak_fake_peak_cannot_displace_a_true_gear() {
         let mut h = RatioHistogram::new();
-        // Six clusters, but 100→93 is a 1.075 step — below any real gearbox's
-        // adjacent-gear spacing. One of them must be a fake peak (e.g. from
-        // clutch-slip samples), so no calibration may be produced.
+        // A weak spurious cluster near 4th (ratio 93, e.g. clutch slip) must
+        // lose to the stronger true 4th-gear peak at 100.
         let mut rng = Lcg(0x1234_5678);
-        for r in [240.0, 165.0, 125.0, 100.0, 93.0, 70.0] {
+        for _ in 0..40 {
+            h.add_sample((100.0 + (rng.next() - 0.5) * 2.0) * 30.0, 30.0, false, false);
+        }
+        for _ in 0..16 {
+            h.add_sample((93.0 + (rng.next() - 0.5) * 2.0) * 30.0, 30.0, false, false);
+        }
+        for r in [240.0, 165.0, 125.0] {
             for _ in 0..40 {
-                let ratio = r + (rng.next() - 0.5) * 2.0;
-                h.add_sample(ratio * 30.0, 30.0, false, false);
+                h.add_sample((r + (rng.next() - 0.5) * 2.0) * 30.0, 30.0, false, false);
             }
         }
-        assert_eq!(h.derive_bands(), None);
+        let (bands, _) = h.derive_bands(&REFERENCE).expect("anchored");
+        assert!((bands[3] - 100.0).abs() < 3.0, "4th = {:.1}", bands[3]);
     }
 
     #[test]
@@ -382,7 +388,7 @@ mod tests {
         let restored = RatioHistogram::from_blob(&h.to_blob()).unwrap();
         assert_eq!(restored.samples(), h.samples());
         assert_eq!(restored.hist(), h.hist());
-        assert_eq!(restored.derive_bands(), h.derive_bands());
+        assert_eq!(restored.derive_bands(&REFERENCE), h.derive_bands(&REFERENCE));
     }
 
     #[test]
@@ -406,7 +412,7 @@ mod tests {
             h.debug_mark();
         }
         assert_eq!(h.hist()[0], 5); // capped
-        assert_eq!(h.derive_bands(), None); // marker alone yields no bands
+        assert_eq!(h.derive_bands(&REFERENCE), None); // marker alone yields nothing
     }
 
     #[test]
