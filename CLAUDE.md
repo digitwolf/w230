@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Gear indicator for a Kawasaki W230 motorcycle: an M5Stack ATOM Matrix (ESP32-PICO-D4) reads the KDS diagnostic K-line (ISO-14230 over a TJA1021 LIN transceiver) and shows the current gear on the 5x5 LED matrix. `docs/` holds the research and design notes (diagnostic port protocol, hardware, firmware design); `hardware/wiring.md` has the wiring.
+Gear indicator for a Kawasaki W230 motorcycle: an M5Stack ATOM Matrix (ESP32-PICO-D4) reads the KDS diagnostic K-line (ISO-14230 over a TJA1021 LIN transceiver) and shows the current gear on the 5x5 LED matrix. `docs/` holds the research and design notes — start with `docs/05-bringup-learnings.md` (live-verified findings + architecture) and `docs/06-kds-protocol-reference.md` (wire-level ECU protocol with captured frames); `hardware/wiring.md` describes the older C++ design only.
 
 Two firmware implementations exist:
 - `firmware/` — original C++ version (PlatformIO, `platformio.ini`)
