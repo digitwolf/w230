@@ -1,0 +1,29 @@
+[package]
+name = "w230-gear-indicator"
+version = "0.1.0"
+authors = ["digitwolf"]
+edition = "2021"
+rust-version = "1.77"
+
+[[bin]]
+name = "w230-gear-indicator"
+path = "src/main.rs"
+harness = false
+
+[features]
+default = ["std", "esp-idf-svc/native"]
+std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
+alloc = ["esp-idf-svc/alloc"]
+
+[dependencies]
+w230-core = { path = "../core" }
+anyhow = "1"
+log = "0.4"
+esp-idf-svc = { version = "0.51", default-features = false }
+esp-idf-hal = "0.45"
+smart-leds = "0.4"
+rgb = "0.8"
+ws2812-esp32-rmt-driver = { version = "0.12", features = ["smart-leds-trait"] }
+
+[build-dependencies]
+embuild = "0.33"
