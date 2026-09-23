@@ -21,6 +21,7 @@ targets:
     sources:
       - path: Sources/W230
       - path: Assets.xcassets
+      - path: PrivacyInfo.xcprivacy
     info:
       path: Info.plist
       properties:

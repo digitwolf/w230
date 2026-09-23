@@ -141,6 +141,7 @@ pub fn spawn(
     {
         let mut sh = lock(&shared);
         sh.ota.current = current_version.to_string();
+        info!("OTA: otadata at boot {}", platform::otadata_dump());
         match ota.get_running_slot() {
             Ok(slot) => {
                 sh.slot = slot.label.to_string();
@@ -217,7 +218,10 @@ impl Worker {
                     if pending {
                         match self.ota.mark_running_slot_valid() {
                             Ok(()) => {
-                                info!("OTA: self-test passed, image marked valid");
+                                info!(
+                                    "OTA: self-test passed, image marked valid; otadata {}",
+                                    platform::otadata_dump()
+                                );
                                 let mut sh = lock(&self.shared);
                                 sh.pending_verify = false;
                                 sh.changed = true;
@@ -654,6 +658,7 @@ impl Worker {
         // esp_ota_end: image header/segment/hash validation on the slot.
         let finished = update.finish()?;
         finished.activate()?;
+        info!("OTA: otadata after activate {}", platform::otadata_dump());
         drop(shared);
         self.last_wifi_use = Instant::now();
         Ok(())

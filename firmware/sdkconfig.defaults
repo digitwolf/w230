@@ -15,7 +15,7 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # Version stamped into the image's app descriptor (checked by build.rs
 # against esp32/Cargo.toml and by the OTA path against the manifest).
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.2.1"
+CONFIG_APP_PROJECT_VER="0.2.2"
 
 # --- TLS for the update download -----------------------------------------
 # Built-in x509 bundle (common roots incl. Amazon) instead of a pinned cert,

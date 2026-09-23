@@ -1,0 +1,7 @@
+Companion app for the open-source W230 gear indicator, an add-on module for the Kawasaki W230 that reads the bike's diagnostic bus and shows the current gear on an LED matrix.
+
+Over Bluetooth, W230 Gear shows what the indicator sees: live gear, rpm, speed and the rpm/speed ratio against the gear bands; the indicator's ride black box (reset reasons, link drops, learning statistics); the self-learned ratio calibration with its histogram; and a firmware event log. A troubleshooting screen turns that data into concrete checks, and everything can be exported as JSON or CSV.
+
+The app also provisions a WiFi network on the indicator and manages its firmware: it checks for updates at ignition-on or on request, shows release notes, and installs over the air with automatic rollback if the new firmware fails its self-test.
+
+Requires the W230 gear indicator hardware (build instructions and firmware at github.com/digitwolf/w230). No account, no analytics, no data leaves your phone.

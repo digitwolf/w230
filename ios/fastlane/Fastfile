@@ -1,0 +1,97 @@
+# App Store / TestFlight delivery for W230 Gear, run on a macOS GitHub Actions
+# runner (.github/workflows/ios-release.yml) — no Mac needed locally.
+#
+# Signing: Xcode "cloud signing" with an App Store Connect API key. The key
+# must have the Admin or App Manager role; Xcode then creates and manages the
+# distribution certificate and profile itself, so there is nothing to store
+# in the repo or a match bucket.
+#
+# Secrets (GitHub → Settings → Secrets):
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_CONTENT (the .p8 contents, base64)
+default_platform(:ios)
+
+SCHEME = "W230"
+PROJECT = "W230.xcodeproj"
+
+platform :ios do
+  before_all do
+    setup_ci if ENV["CI"]
+  end
+
+  desc "Regenerate the Xcode project from project.yml"
+  lane :generate do
+    sh("cd .. && xcodegen generate")
+  end
+
+  # Build number = commits on the branch: monotonic, no state to keep.
+  private_lane :stamp_build do
+    build = sh("git rev-list --count HEAD").strip
+    increment_build_number(build_number: build, xcodeproj: PROJECT)
+    build
+  end
+
+  private_lane :api_key do
+    app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_KEY_CONTENT"),
+      is_key_content_base64: true,
+      in_house: false
+    )
+  end
+
+  private_lane :archive do
+    key = api_key
+    key_path = File.expand_path("AuthKey_#{ENV.fetch('ASC_KEY_ID')}.p8")
+    File.write(key_path, Base64.decode64(ENV.fetch("ASC_KEY_CONTENT")))
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Release",
+      export_method: "app-store",
+      xcargs: "-allowProvisioningUpdates " \
+              "-authenticationKeyPath #{key_path} " \
+              "-authenticationKeyID #{ENV.fetch('ASC_KEY_ID')} " \
+              "-authenticationKeyIssuerID #{ENV.fetch('ASC_ISSUER_ID')}",
+      export_options: {
+        signingStyle: "automatic",
+        uploadSymbols: true
+      }
+    )
+  ensure
+    File.delete(key_path) if key_path && File.exist?(key_path)
+  end
+
+  desc "Build and upload to TestFlight (internal testers see it immediately)"
+  lane :beta do
+    generate
+    build = stamp_build
+    archive
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true,
+      changelog: "Build #{build}: #{last_git_commit[:message].lines.first.strip}"
+    )
+  end
+
+  desc "Build, upload, and create/refresh the App Store version (not submitted for review)"
+  lane :release do |options|
+    generate
+    stamp_build
+    archive
+    upload_to_app_store(
+      api_key: api_key,
+      app_version: get_version_number(xcodeproj: PROJECT, target: SCHEME),
+      metadata_path: "./fastlane/metadata",
+      skip_screenshots: true,
+      skip_binary_upload: false,
+      submit_for_review: options[:submit] == "true",
+      automatic_release: false,
+      precheck_include_in_app_purchases: false,
+      submission_information: {
+        add_id_info_uses_idfa: false,
+        export_compliance_uses_encryption: false
+      }
+    )
+  end
+end

@@ -1,0 +1,1 @@
+motorcycle,gear indicator,kawasaki,w230,esp32,bluetooth,diagnostics,firmware

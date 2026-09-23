@@ -3,4 +3,10 @@
 /.swiftpm
 /.sourcekit-lsp
 /W230.xcodeproj
+/build
+*.ipa
+*.dSYM.zip
+/fastlane/report.xml
+/fastlane/README.md
+/AuthKey_*.p8
 .DS_Store

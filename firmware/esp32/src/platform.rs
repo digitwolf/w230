@@ -80,3 +80,41 @@ pub fn app_project_name() -> String {
 pub fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
+
+/// Raw dump of the `otadata` partition's two entries, for the boot log:
+/// `[seq, state, crc]` per entry. Rollback debugging needs the ground truth
+/// the ESP-IDF state accessors abstract away.
+pub fn otadata_dump() -> String {
+    // SAFETY: esp_partition_find_first returns a pointer into the static
+    // partition table (valid for the program's life) or null; the read
+    // targets a 32-byte stack buffer with matching length.
+    unsafe {
+        let part = sys::esp_partition_find_first(
+            sys::esp_partition_type_t_ESP_PARTITION_TYPE_DATA,
+            sys::esp_partition_subtype_t_ESP_PARTITION_SUBTYPE_DATA_OTA,
+            core::ptr::null(),
+        );
+        if part.is_null() {
+            return "no otadata partition".into();
+        }
+        let mut out = String::new();
+        for i in 0..2usize {
+            let mut buf = [0u8; 32];
+            let err = sys::esp_partition_read(
+                part,
+                i * 0x1000,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+            );
+            let u32_at =
+                |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+            out.push_str(&format!(
+                "[{i}: seq={:#x} state={:#x} crc={:#x} err={err}] ",
+                u32_at(0),
+                u32_at(24),
+                u32_at(28)
+            ));
+        }
+        out
+    }
+}

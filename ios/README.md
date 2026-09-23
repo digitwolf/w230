@@ -56,6 +56,37 @@ send (brightness, wipe, WiFi…) makes iOS pair with the indicator: accept the
 prompt once. If pairing ever wedges, forget `W230-GEAR` in iOS Settings →
 Bluetooth and reconnect.
 
+## TestFlight and App Store (paid Apple Developer Program)
+
+`fastlane/` + `.github/workflows/ios-release.yml` deliver from a macOS
+GitHub Actions runner; nothing runs locally.
+
+One-time setup:
+1. App Store Connect → Users and Access → Integrations → App Store Connect
+   API → generate a key with the **App Manager** role. Note the Key ID and
+   Issuer ID, download the `.p8`.
+2. GitHub repo secrets: `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_CONTENT`
+   (`base64 -w0 AuthKey_XXXX.p8`).
+3. App Store Connect → My Apps → New App: iOS, name "W230 Gear", bundle ID
+   `com.digitwolf.w230` (register it under Certificates, IDs & Profiles
+   first), SKU `w230-gear`.
+
+Then:
+- `git tag app-v1.0.0 && git push --tags` → TestFlight build (lane `beta`);
+  bump `MARKETING_VERSION` in `project.yml` for each store version. Build
+  numbers are the commit count.
+- Actions → "iOS release" → Run workflow → lane `release` uploads the build
+  and the metadata in `fastlane/metadata`; tick "submit" to send it to
+  review. Screenshots are not automated: upload them once in App Store
+  Connect (6.9" and 6.5" iPhone sets).
+
+Review notes worth pasting into App Store Connect: the app needs the W230
+indicator hardware (guideline 2.1), so attach a short video of the app
+connected to the bike and point to the GitHub project. Bluetooth usage
+string, encryption declaration (`ITSAppUsesNonExemptEncryption = NO`) and
+the privacy manifest (`PrivacyInfo.xcprivacy`, UserDefaults reason CA92.1)
+are in place; `PRIVACY.md` is the privacy policy URL.
+
 ## Firmware compatibility
 
 `Protocol/FirmwareCompatibility.swift` holds the rules: the app reads the

@@ -1,0 +1,50 @@
+name: iOS release
+
+# TestFlight on every push of an `app-v*` tag; App Store lane by hand.
+# Needs repository secrets ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_CONTENT
+# (App Store Connect API key with the App Manager role, .p8 base64-encoded).
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: fastlane lane
+        type: choice
+        options: [beta, release]
+        default: beta
+      submit:
+        description: submit the App Store version for review (release lane only)
+        type: boolean
+        default: false
+
+jobs:
+  deliver:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: ios
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
+      FASTLANE_SKIP_UPDATE_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build number = commit count
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: ios
+      - name: xcodegen
+        run: brew install xcodegen
+      - name: fastlane
+        run: |
+          lane="${{ github.event.inputs.lane || 'beta' }}"
+          if [ "$lane" = "release" ]; then
+            bundle exec fastlane ios release submit:${{ github.event.inputs.submit || 'false' }}
+          else
+            bundle exec fastlane ios beta
+          fi

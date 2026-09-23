@@ -1,0 +1,1 @@
+First release: live dashboard, diagnostics and black box, calibration histogram, troubleshooting checks, WiFi setup and over-the-air firmware updates.
