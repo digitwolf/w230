@@ -46,6 +46,8 @@ jobs:
           ldproxy: true
       - name: build
         run: cargo build --release
+      - name: clippy (firmware)
+        run: cargo clippy --release -- -D warnings
 
   ios:
     name: iOS app build

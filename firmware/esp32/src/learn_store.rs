@@ -53,7 +53,7 @@ fn reset_reason_name(r: u32) -> &'static str {
         1 => "power-on",
         3 => "software",
         4 => "panic",
-        5 | 6 | 7 => "watchdog",
+        5..=7 => "watchdog",
         8 => "deep-sleep",
         9 => "brownout",
         10 => "sdio",
@@ -164,7 +164,7 @@ impl RatioLearner {
         self.debug.boots += 1;
         // Hardware reset reason: brownout/panic/watchdog = the ride-reset
         // smoking gun; power-on = normal key cycle.
-        let reason = unsafe { esp_idf_svc::sys::esp_reset_reason() } as u32;
+        let reason = crate::platform::reset_reason();
         self.debug.last_reset_reason = reason;
         if !matches!(reason, 1 | 3) {
             self.debug.abnormal_resets += 1;
@@ -196,7 +196,7 @@ impl RatioLearner {
     /// Returns true when a write actually happened (new data since last time).
     pub fn save(&mut self) -> bool {
         // Track the free-heap floor (leak detector for the ride-reset hunt).
-        let free = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+        let free = crate::platform::free_heap();
         if self.debug.min_free_heap == 0 || free < self.debug.min_free_heap {
             self.debug.min_free_heap = free;
         }

@@ -23,6 +23,7 @@ mod config_store;
 mod kds;
 mod learn_store;
 mod ota;
+mod platform;
 mod web;
 
 use ble::{Attr, Ble};
@@ -37,6 +38,7 @@ use kds::Kds;
 use learn_store::RatioLearner;
 use log::{info, warn};
 use ota::{OtaHandle, OtaRequest};
+use platform::lock;
 use smart_leds::SmartLedsWrite;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -177,7 +179,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 };
                 while let Ok(frame) = led_rx.recv() {
-                    if let Err(e) = leds.write(frame.into_iter()) {
+                    if let Err(e) = leds.write(frame) {
                         warn!("LED write failed: {e}");
                     }
                 }
@@ -252,7 +254,7 @@ fn main() -> anyhow::Result<()> {
         (None, ota)
     };
     let boot_slot_info = ota.as_ref().map(|o| {
-        let sh = o.shared.lock().unwrap();
+        let sh = lock(&o.shared);
         (
             sh.slot.clone(),
             sh.pending_verify,
@@ -263,7 +265,7 @@ fn main() -> anyhow::Result<()> {
         "W230 firmware {FW_VERSION} (BLE proto {}), slot {:?}, {} KiB heap free after init",
         proto::PROTOCOL_VERSION,
         boot_slot_info,
-        unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+        platform::free_heap() / 1024
     );
 
     let mut estimator = GearEstimator::new();
@@ -283,7 +285,7 @@ fn main() -> anyhow::Result<()> {
     let mut diag_regs: Option<Vec<(u8, Vec<u8>)>> = None;
     let mut deep_watch: Option<Vec<(u16, Vec<u8>)>> = None;
     let mut brightness_idx: usize =
-        (config.lock().unwrap().cfg.brightness_idx as usize).min(BRIGHTNESS_STEPS.len() - 1);
+        (lock(&config).cfg.brightness_idx as usize).min(BRIGHTNESS_STEPS.len() - 1);
     let mut button_was_down = false;
     let mut button_down_at = Instant::now();
     let mut neutral_was_active = false;
@@ -330,7 +332,7 @@ fn main() -> anyhow::Result<()> {
 
         // --- OTA state: mirror worker → BLE/events, drive the display ---
         if let Some(o) = &ota {
-            let mut sh = o.shared.lock().unwrap();
+            let mut sh = lock(&o.shared);
             if sh.changed {
                 sh.changed = false;
                 if sh.ota.state != ota_status.state {
@@ -417,7 +419,7 @@ fn main() -> anyhow::Result<()> {
         if !boot_check_done && boot.elapsed() >= BOOT_CHECK_DELAY {
             boot_check_done = true;
             let (policy, has_wifi) = {
-                let c = config.lock().unwrap();
+                let c = lock(&config);
                 (c.cfg.boot_policy, c.cfg.ssid.is_some())
             };
             if let Some(o) = &ota {
@@ -479,7 +481,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 brightness_idx = (brightness_idx + 1) % BRIGHTNESS_STEPS.len();
                 info!("brightness -> {}", BRIGHTNESS_STEPS[brightness_idx]);
-                config.lock().unwrap().set_brightness(brightness_idx as u8);
+                lock(&config).set_brightness(brightness_idx as u8);
             }
         }
         button_was_down = down;
@@ -719,7 +721,7 @@ fn main() -> anyhow::Result<()> {
                 estimator.clear_bands();
                 info!("LEARN: calibration wiped (web request)");
             }
-            let mut s = webdiag.shared.lock().unwrap();
+            let mut s = lock(&webdiag.shared);
             s.link_up = link_up;
             s.gear = Some(gear);
             s.rpm = rpm;
@@ -738,7 +740,7 @@ fn main() -> anyhow::Result<()> {
         }
         if let Some(b) = &ble {
             if let Some(o) = &ota {
-                o.shared.lock().unwrap().moving = speed.is_some_and(|s| s >= 1.0);
+                lock(&o.shared).moving = speed.is_some_and(|s| s >= 1.0);
             }
             if b.live_subscribed() {
                 let live = LiveStatus {
@@ -762,13 +764,13 @@ fn main() -> anyhow::Result<()> {
             // attribute.
             if last_slow_publish.elapsed() >= BLE_SLOW_PUBLISH {
                 last_slow_publish = Instant::now();
-                let cfg = config.lock().unwrap();
+                let cfg = lock(&config);
                 let (slot, pending, _) = boot_slot_info.clone().unwrap_or_default();
-                let mac = mac_string();
+                let mac = platform::bt_mac();
                 let info = proto::DeviceInfo {
                     fw_version: FW_VERSION,
                     project: w230_core::ota_manifest::PROJECT_NAME,
-                    idf_version: idf_version(),
+                    idf_version: platform::idf_version(),
                     built: BUILD_STAMP,
                     hardware: HARDWARE,
                     slot: if slot.is_empty() { "factory" } else { &slot },
@@ -776,7 +778,7 @@ fn main() -> anyhow::Result<()> {
                     pending_verify: pending && !self_test_done,
                     boot_policy: cfg.cfg.boot_policy,
                     uptime_s,
-                    free_heap: unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
+                    free_heap: platform::free_heap(),
                     min_free_heap: learner.min_free_heap(),
                     reset_reason: learner.reset_reason(),
                     mac: &mac,
@@ -837,33 +839,6 @@ const BUILD_STAMP: &str = match option_env!("W230_BUILD_STAMP") {
     None => "dev",
 };
 
-fn idf_version() -> &'static str {
-    // e.g. "v5.3.3" — from the linked ESP-IDF, not the crate.
-    static VER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    VER.get_or_init(|| unsafe {
-        let p = esp_idf_svc::sys::esp_get_idf_version();
-        if p.is_null() {
-            "unknown".into()
-        } else {
-            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    })
-}
-
-fn mac_string() -> String {
-    let mut mac = [0u8; 6];
-    unsafe {
-        esp_idf_svc::sys::esp_read_mac(
-            mac.as_mut_ptr(),
-            esp_idf_svc::sys::esp_mac_type_t_ESP_MAC_BT,
-        );
-    }
-    format!(
-        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    )
-}
-
 /// Last value pushed per attribute, so unchanged JSON isn't rewritten into
 /// the GATT table every second.
 #[derive(Default)]
@@ -904,7 +879,7 @@ fn handle_ble_commands(
 ) {
     let Some(b) = ble else { return };
     while let Ok(creds) = b.wifi_credentials.try_recv() {
-        config.lock().unwrap().set_wifi(&creds.ssid, &creds.psk);
+        lock(config).set_wifi(&creds.ssid, &creds.psk);
         events.push(uptime_s, format!("wifi set: {}", creds.ssid));
         if let Some(o) = ota {
             o.request(OtaRequest::TestWifi);
@@ -921,7 +896,7 @@ fn handle_ble_commands(
             Command::SetBrightness(i) => {
                 let i = (i as usize).min(BRIGHTNESS_STEPS.len() - 1);
                 *brightness_idx = i;
-                config.lock().unwrap().set_brightness(i as u8);
+                lock(config).set_brightness(i as u8);
                 info!("brightness -> {} (app)", BRIGHTNESS_STEPS[i]);
             }
             Command::CheckUpdate => {
@@ -938,7 +913,7 @@ fn handle_ble_commands(
                 }
             }
             Command::SetBootPolicy(p) => {
-                config.lock().unwrap().set_boot_policy(p);
+                lock(config).set_boot_policy(p);
                 events.push(uptime_s, format!("boot policy {p}"));
             }
             Command::Reboot => {
@@ -948,10 +923,10 @@ fn handle_ble_commands(
                 esp_idf_hal::reset::restart();
             }
             Command::ForgetWifi => {
-                config.lock().unwrap().clear_wifi();
+                lock(config).clear_wifi();
                 events.push(uptime_s, "wifi forgotten");
                 if let Some(o) = ota {
-                    let mut sh = o.shared.lock().unwrap();
+                    let mut sh = lock(&o.shared);
                     sh.wifi = WifiStatus::default();
                     sh.changed = true;
                 }
@@ -961,11 +936,7 @@ fn handle_ble_commands(
                 events.push(uptime_s, "black box cleared");
             }
             Command::SetManifestUrl(url) => {
-                config.lock().unwrap().set_manifest_url(if url.is_empty() {
-                    None
-                } else {
-                    Some(&url)
-                });
+                lock(config).set_manifest_url(if url.is_empty() { None } else { Some(&url) });
                 events.push(
                     uptime_s,
                     if url.is_empty() {

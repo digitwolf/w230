@@ -41,6 +41,8 @@ use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use log::{info, warn};
 use sha2::{Digest, Sha256};
 
+use crate::platform::{self, lock};
+
 use w230_core::ble_proto::{OtaState, OtaStatus, WifiState, WifiStatus};
 use w230_core::ota_manifest::{decide, Manifest, UpdateDecision};
 
@@ -130,14 +132,14 @@ pub fn spawn(
     let current_version: &'static str = crate::FW_VERSION;
     info!(
         "OTA: worker starting (fw {current_version}, manifest {default_manifest_url}), {} KiB heap free",
-        unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+        platform::free_heap() / 1024
     );
     let (tx, rx) = sync_channel(4);
     let shared = Arc::new(Mutex::new(OtaShared::default()));
 
     let ota = EspOta::new()?;
     {
-        let mut sh = shared.lock().unwrap();
+        let mut sh = lock(&shared);
         sh.ota.current = current_version.to_string();
         match ota.get_running_slot() {
             Ok(slot) => {
@@ -160,13 +162,13 @@ pub fn spawn(
             warn!("OTA: slot '{}' holds a rolled-back image", bad.label);
             sh.rolled_back_from = Some(bad.label.to_string());
         }
-        let cfg = config.lock().unwrap();
+        let cfg = lock(&config);
         sh.wifi.configured = cfg.cfg.ssid.is_some();
         sh.wifi.ssid = cfg.cfg.ssid.clone();
         sh.changed = true;
     }
 
-    let running_project = running_app_project();
+    let running_project = platform::app_project_name();
     info!("OTA: running image descriptor project '{running_project}'");
 
     let worker = Worker {
@@ -211,12 +213,12 @@ impl Worker {
                     let _ = self.wifi_connect();
                 }
                 Ok(OtaRequest::MarkValid) => {
-                    let pending = self.shared.lock().unwrap().pending_verify;
+                    let pending = lock(&self.shared).pending_verify;
                     if pending {
                         match self.ota.mark_running_slot_valid() {
                             Ok(()) => {
                                 info!("OTA: self-test passed, image marked valid");
-                                let mut sh = self.shared.lock().unwrap();
+                                let mut sh = lock(&self.shared);
                                 sh.pending_verify = false;
                                 sh.changed = true;
                             }
@@ -235,13 +237,13 @@ impl Worker {
     }
 
     fn set_ota<F: FnOnce(&mut OtaStatus)>(&self, f: F) {
-        let mut sh = self.shared.lock().unwrap();
+        let mut sh = lock(&self.shared);
         f(&mut sh.ota);
         sh.changed = true;
     }
 
     fn set_wifi<F: FnOnce(&mut WifiStatus)>(&self, f: F) {
-        let mut sh = self.shared.lock().unwrap();
+        let mut sh = lock(&self.shared);
         f(&mut sh.wifi);
         sh.changed = true;
     }
@@ -271,12 +273,13 @@ impl Worker {
                 .modem
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("wifi modem unavailable"))?;
-            let before = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+            let before = platform::free_heap();
             let driver = match EspWifi::new(modem, self.sysloop.clone(), Some(self.nvs.clone())) {
                 Ok(d) => d,
                 Err(e) => {
-                    // EspWifi::new consumed the modem token even on failure; the
-                    // hardware is untouched, so a fresh token is safe here.
+                    // SAFETY: EspWifi::new consumed the modem token but no driver was
+                    // created, so nothing else owns the WiFi peripheral; a fresh token
+                    // restores the single-owner invariant.
                     self.modem = Some(unsafe { WifiModem::new() });
                     return Err(e.into());
                 }
@@ -284,7 +287,7 @@ impl Worker {
             self.wifi = Some(BlockingWifi::wrap(driver, self.sysloop.clone())?);
             info!(
                 "WIFI: driver created ({} KiB heap free, was {} KiB)",
-                unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024,
+                platform::free_heap() / 1024,
                 before / 1024
             );
         }
@@ -304,7 +307,7 @@ impl Worker {
             return true;
         }
         let (ssid, psk) = {
-            let cfg = self.config.lock().unwrap();
+            let cfg = lock(&self.config);
             (cfg.cfg.ssid.clone(), cfg.cfg.psk.clone())
         };
         let Some(ssid) = ssid else {
@@ -393,10 +396,12 @@ impl Worker {
                 let _ = w.stop();
             }
             drop(w);
+            // SAFETY: the driver that owned the WiFi peripheral was just dropped
+            // (esp_wifi_deinit ran), so exactly one owner exists again.
             self.modem = Some(unsafe { WifiModem::new() });
             info!(
                 "WIFI: driver released ({} KiB heap free)",
-                unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+                platform::free_heap() / 1024
             );
         }
         self.wifi_up = false;
@@ -518,7 +523,7 @@ impl Worker {
             self.fail("no update available to install".into());
             return;
         };
-        if self.shared.lock().unwrap().moving {
+        if lock(&self.shared).moving {
             self.fail("bike is moving — stop before updating".into());
             return;
         }
@@ -580,7 +585,7 @@ impl Worker {
         let shared = self.shared.clone();
         let running_project = self.running_project.clone();
         let set_progress = |pct: u8| {
-            let mut sh = shared.lock().unwrap();
+            let mut sh = lock(&shared);
             sh.ota.progress = pct;
             sh.changed = true;
         };
@@ -642,7 +647,7 @@ impl Worker {
             return Err(e);
         }
         {
-            let mut sh = shared.lock().unwrap();
+            let mut sh = lock(&shared);
             sh.ota.state = OtaState::Verifying;
             sh.changed = true;
         }
@@ -653,19 +658,6 @@ impl Worker {
         self.last_wifi_use = Instant::now();
         Ok(())
     }
-}
-
-/// Project name stamped into the running image (`esp_app_desc_t`). Read as
-/// a bounded byte array, never as a C string: the field is 32 bytes and a
-/// full-width name would have no terminator.
-fn running_app_project() -> String {
-    let d = unsafe { esp_idf_svc::sys::esp_app_get_description() };
-    if d.is_null() {
-        return String::new();
-    }
-    let raw: [u8; 32] = unsafe { core::mem::transmute((*d).project_name) };
-    let len = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-    String::from_utf8_lossy(&raw[..len]).into_owned()
 }
 
 /// The 256-byte `esp_app_desc_t` at the head of every ESP-IDF image carries
@@ -705,5 +697,5 @@ fn verify_app_descriptor(head: &[u8], m: &Manifest, expected_project: &str) -> a
 }
 
 pub fn uptime_s() -> u32 {
-    (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1_000_000) as u32
+    platform::uptime_s()
 }

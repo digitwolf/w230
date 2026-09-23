@@ -44,6 +44,8 @@ pub enum ManifestError {
     BadSize,
 }
 
+impl std::error::Error for ManifestError {}
+
 impl core::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

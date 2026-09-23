@@ -34,6 +34,7 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{EspError, ESP_FAIL};
 use log::{info, warn};
 
+use crate::platform::{self, lock};
 use w230_core::ble_proto::{self as proto, Command, WifiCredentials, MAX_ATTR_LEN};
 
 const APP_ID: u16 = 0;
@@ -179,9 +180,32 @@ const CHARS: [CharDef; 12] = [
     },
 ];
 
-fn char_index(attr: Attr) -> usize {
-    CHARS.iter().position(|c| c.attr == attr).unwrap()
+/// Position of an attribute in [`CHARS`]; a `const fn` so a table/enum
+/// mismatch is a compile-time error (the unnamed const below), never a panic.
+const fn char_index(attr: Attr) -> usize {
+    match attr {
+        Attr::Live => 0,
+        Attr::DeviceInfo => 1,
+        Attr::BlackBox => 2,
+        Attr::Calibration => 3,
+        Attr::Hist0 => 4,
+        Attr::Hist1 => 5,
+        Attr::Events => 6,
+        Attr::Command => 7,
+        Attr::WifiConfig => 8,
+        Attr::WifiStatus => 9,
+        Attr::OtaStatus => 10,
+        Attr::Settings => 11,
+    }
 }
+
+const _: () = {
+    let mut i = 0;
+    while i < CHARS.len() {
+        assert!(char_index(CHARS[i].attr) == i, "CHARS order != char_index");
+        i += 1;
+    }
+};
 
 type Driver = BtDriver<'static, BleMode>;
 type Gap = Arc<EspBleGap<'static, BleMode, Arc<Driver>>>;
@@ -245,7 +269,7 @@ impl Ble {
             Arc::new(BtDriver::<BleMode>::new(modem, Some(nvs)).map_err(step("bt driver"))?);
         info!(
             "BLE: controller + host up ({} KiB heap free)",
-            unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+            platform::free_heap() / 1024
         );
         let gap: Gap = Arc::new(EspBleGap::new(driver.clone()).map_err(step("gap"))?);
         let gatts: Gatts = Arc::new(EspGatts::new(driver.clone()).map_err(step("gatts"))?);
@@ -268,6 +292,8 @@ impl Ble {
             use esp_idf_svc::sys::*;
             let set =
                 |param: esp_ble_sm_param_t, v: u8, name: &'static str| -> anyhow::Result<()> {
+                    // SAFETY: every parameter set here is a one-byte value the stack
+                    // copies during the call; `v` outlives the call.
                     esp!(unsafe {
                         esp_ble_gap_set_security_param(
                             param,
@@ -298,6 +324,7 @@ impl Ble {
         }
         // Long attribute values (JSON up to 512 B) in as few ATT round trips
         // as the phone allows; iOS negotiates 185.
+        // SAFETY: plain FFI call with an in-range constant; host stack is enabled.
         esp_idf_svc::sys::esp!(unsafe { esp_idf_svc::sys::esp_ble_gatt_set_local_mtu(500) })
             .map_err(step("local mtu"))?;
 
@@ -336,7 +363,7 @@ impl Ble {
     /// a no-op until the service is built.
     pub fn publish(&self, attr: Attr, value: &[u8]) {
         let handle = {
-            let st = self.inner.state.lock().unwrap();
+            let st = lock(&self.inner.state);
             if !st.ready {
                 return;
             }
@@ -357,7 +384,7 @@ impl Ble {
         self.publish(attr, value);
         let idx = char_index(attr);
         let targets: Vec<(GattInterface, ConnectionId, Handle, usize)> = {
-            let st = self.inner.state.lock().unwrap();
+            let st = lock(&self.inner.state);
             let (Some(gatt_if), Some(h)) = (st.gatt_if, st.handles[idx]) else {
                 return;
             };
@@ -376,7 +403,7 @@ impl Ble {
     }
 
     pub fn connections(&self) -> u8 {
-        self.inner.state.lock().unwrap().connections.len() as u8
+        lock(&self.inner.state).connections.len() as u8
     }
 
     /// True when at least one phone subscribed to the live packet — the
@@ -399,7 +426,7 @@ impl Inner {
             BleGapEvent::AdvertisingConfigured(status)
             | BleGapEvent::ScanResponseConfigured(status) => {
                 check_bt(status)?;
-                let mut st = self.state.lock().unwrap();
+                let mut st = lock(&self.state);
                 st.adv_parts_configured += 1;
                 if st.adv_parts_configured == 2 {
                     drop(st);
@@ -409,6 +436,35 @@ impl Inner {
             }
             BleGapEvent::AuthenticationComplete { bd_addr, status } => {
                 info!("BLE: pairing with {bd_addr}: {status:?}");
+            }
+            // The phone asks to pair when it first writes to an encrypted
+            // characteristic; Bluedroid waits for an explicit acceptance.
+            // The binding's event carries no address, so accept for every
+            // connected peer (Just Works: no passkey to compare).
+            BleGapEvent::SecurityRequest => {
+                let peers: Vec<BdAddr> = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .connections
+                    .iter()
+                    .map(|c| c.peer)
+                    .collect();
+                for peer in peers {
+                    info!("BLE: accepting pairing request from {peer}");
+                    let mut addr = peer.raw();
+                    // SAFETY: `addr` is a 6-byte array the stack reads during the call
+                    // (the API takes a non-const pointer but does not retain it).
+                    esp_idf_svc::sys::esp!(unsafe {
+                        esp_idf_svc::sys::esp_ble_gap_security_rsp(addr.as_mut_ptr(), true)
+                    })?;
+                }
+            }
+            BleGapEvent::PasskeyRequest
+            | BleGapEvent::NumericComparisonRequest
+            | BleGapEvent::PasskeyNotification { .. }
+            | BleGapEvent::Key => {
+                info!("BLE: security event {event:?}");
             }
             // Advertising stops on connect and restarts on disconnect; one
             // phone at a time keeps the radio schedule simple.
@@ -431,7 +487,7 @@ impl Inner {
                 ..
             } => {
                 check_gatt(status)?;
-                self.state.lock().unwrap().service_handle = Some(service_handle);
+                lock(&self.state).service_handle = Some(service_handle);
                 self.gatts.start_service(service_handle)?;
                 self.add_char(service_handle, 0)?;
             }
@@ -443,7 +499,7 @@ impl Inner {
             } => {
                 check_gatt(status)?;
                 let (idx, needs_cccd) = {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = lock(&self.state);
                     let idx = st.pending;
                     if char_uuid != BtUuid::uuid128(proto::uuid(CHARS[idx].slot)) {
                         warn!("BLE: unexpected characteristic added at {idx}");
@@ -471,7 +527,7 @@ impl Inner {
             } => {
                 check_gatt(status)?;
                 let idx = {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = lock(&self.state);
                     let idx = st.pending;
                     st.cccd[idx] = Some(attr_handle);
                     idx
@@ -479,14 +535,14 @@ impl Inner {
                 self.advance(service_handle, idx)?;
             }
             GattsEvent::Mtu { conn_id, mtu } => {
-                let mut st = self.state.lock().unwrap();
+                let mut st = lock(&self.state);
                 if let Some(c) = st.connections.iter_mut().find(|c| c.conn_id == conn_id) {
                     c.mtu = mtu;
                 }
             }
             GattsEvent::PeerConnected { conn_id, addr, .. } => {
                 let accepted = {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = lock(&self.state);
                     if st.connections.len() < MAX_CONNECTIONS {
                         st.connections.push(Connection {
                             peer: addr,
@@ -511,7 +567,7 @@ impl Inner {
             }
             GattsEvent::PeerDisconnected { addr, reason, .. } => {
                 {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = lock(&self.state);
                     st.connections.retain(|c| c.peer != addr);
                 }
                 info!("BLE: {addr} disconnected ({reason:?})");
@@ -549,7 +605,7 @@ impl Inner {
                 need_rsp: true,
                 ..
             } => {
-                let st = self.state.lock().unwrap();
+                let st = lock(&self.state);
                 if let Some(i) = st.cccd.iter().position(|h| *h == Some(handle)) {
                     let subscribed = st
                         .connections
@@ -575,7 +631,7 @@ impl Inner {
                 canceled: false, ..
             } => {
                 for attr in [Attr::Command, Attr::WifiConfig] {
-                    let h = self.state.lock().unwrap().handles[char_index(attr)];
+                    let h = lock(&self.state).handles[char_index(attr)];
                     if let Some(h) = h {
                         let mut buf = [0u8; 256];
                         if let Ok(n) = self.gatts.get_attr(h, &mut buf) {
@@ -592,7 +648,7 @@ impl Inner {
     }
 
     fn create_service(&self, gatt_if: GattInterface) -> Result<(), EspError> {
-        self.state.lock().unwrap().gatt_if = Some(gatt_if);
+        lock(&self.state).gatt_if = Some(gatt_if);
         self.gap.set_device_name(proto::DEVICE_NAME)?;
         // Flags + 128-bit service UUID already fill 21 of the 31 advertising
         // bytes, so the name rides in the scan response.
@@ -643,7 +699,7 @@ impl Inner {
         if def.notify {
             properties |= Property::Notify;
         }
-        self.state.lock().unwrap().pending = idx;
+        lock(&self.state).pending = idx;
         self.gatts.add_characteristic(
             service_handle,
             &GattCharacteristic {
@@ -662,7 +718,7 @@ impl Inner {
         if next < CHARS.len() {
             self.add_char(service_handle, next)
         } else {
-            self.state.lock().unwrap().ready = true;
+            lock(&self.state).ready = true;
             info!("BLE: service built ({} characteristics)", CHARS.len());
             Ok(())
         }
@@ -679,7 +735,7 @@ impl Inner {
             offset,
             need_rsp,
         } = *req;
-        let mut st = self.state.lock().unwrap();
+        let mut st = lock(&self.state);
         if let Some(i) = st.cccd.iter().position(|h| *h == Some(handle)) {
             if offset == 0 && value.len() == 2 {
                 let on = value[0] & 0x01 != 0;
@@ -743,7 +799,7 @@ impl Inner {
             _ => {}
         }
         // Clear so a later ExecWrite can't replay a stale value.
-        if let Some(h) = self.state.lock().unwrap().handles[char_index(attr)] {
+        if let Some(h) = lock(&self.state).handles[char_index(attr)] {
             let _ = self.gatts.set_attr(h, &[]);
         }
     }

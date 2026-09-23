@@ -266,6 +266,20 @@ pub fn bin_ratio(bin: usize) -> f32 {
 // JSON bodies. Hand-built like `diag.rs` (no serde on the hot path); every
 // builder trims to MAX_ATTR_LEN so a long-read never truncates mid-token.
 
+/// Truncate to at most `max` bytes without splitting a UTF-8 character
+/// (`String::truncate` panics on a char boundary miss; event text and
+/// release notes can contain dashes, arrows and accents).
+pub fn truncate_utf8(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+}
+
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -490,7 +504,8 @@ pub fn ota_status_json(s: &OtaStatus) -> String {
         let trimmed = OtaStatus {
             notes: s.notes.as_ref().map(|n| {
                 let mut n = n.clone();
-                n.truncate(n.len().saturating_sub(64));
+                let keep = n.len().saturating_sub(64);
+                truncate_utf8(&mut n, keep);
                 n
             }),
             ..s.clone()
@@ -583,7 +598,7 @@ impl EventRing {
             self.events.pop_front();
         }
         let mut text = text.into();
-        text.truncate(48);
+        truncate_utf8(&mut text, 48);
         self.events.push_back((uptime_s, text));
     }
 
@@ -881,6 +896,22 @@ mod tests {
             settings_json(&s),
             "{\"brightness\":1,\"brightnessSteps\":[40,120,255],\"bootPolicy\":1,\"manifestUrl\":\"https://example/m.json\",\"manifestDefault\":true,\"wifiSsid\":null}"
         );
+    }
+
+    #[test]
+    fn truncation_never_splits_a_character() {
+        let mut s = "ota: bike is moving — stop before updating →→→→→→→→→→→→".to_string();
+        truncate_utf8(&mut s, 24); // byte 24 lands inside the em dash
+        assert!(s.len() <= 24);
+        assert!(s.is_char_boundary(s.len()));
+        let mut ring = EventRing::default();
+        ring.push(1, "—".repeat(40)); // 120 bytes of 3-byte chars
+        assert!(ring.to_json().len() <= MAX_ATTR_LEN);
+        let long = OtaStatus {
+            notes: Some("é".repeat(600)),
+            ..Default::default()
+        };
+        assert!(ota_status_json(&long).len() <= MAX_ATTR_LEN);
     }
 
     #[test]
