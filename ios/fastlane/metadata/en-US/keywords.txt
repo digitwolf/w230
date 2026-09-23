@@ -1,1 +1,1 @@
-kawasaki,w230,gear indicator,motorcycle,esp32,bluetooth,diagnostics,firmware,diy,calibration
+kawasaki,w230,gear indicator,motorcycle,stall,shift,diy,bluetooth,diagnostics,firmware

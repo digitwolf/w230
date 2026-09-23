@@ -1,27 +1,34 @@
 # Kawasaki W230 gear indicator
 
-A self-contained gear position indicator for the Kawasaki W230 (2024–26,
-233 cc fuel-injected single), built on an M5Stack ATOM Matrix. It plugs into
-the bike's KDS diagnostic connector, reads engine RPM and road speed from the
-ECU over the ISO-14230 K-line, and shows the current gear on the ATOM's 5×5
-LED matrix. Neutral comes from the gearbox switch wire. No cutting of factory
-wiring, no ECU writes, nothing to configure: the ratio bands start from
-Kawasaki's published gearing and refine themselves as you ride.
+You pull away from a light and the bike stalls: it was in second. At
+100 km/h you go for a seventh gear that does not exist. Through town you
+lug the little single in sixth. The W230's retro cluster shows no gear, and
+neither Kawasaki nor the aftermarket sells a clean way to get one.
 
-Ride-verified on a 2024 W230. Firmware in Rust (ESP-IDF), with the protocol
-and estimation logic unit-tested on the host against frames captured from the
-real ECU.
+This project is the number the bike should have shipped with: a
+matchbox-sized LED matrix that shows **N** and **1–6**, right from the
+first ride, without cutting a factory wire or writing a byte to the ECU. It
+listens to the diagnostic connector the dealer uses, infers the gear from
+engine and road speed, and learns your bike's exact ratios as you ride. An
+iPhone app answers the question every owner asks eventually, "is it right,
+and if not, why?", and keeps the firmware current over WiFi.
 
-**Owner? Start with the [end-to-end owner's guide](docs/owner-guide.md)**:
-parts, wiring, the one-time flash, first rides, the app, updates and
-troubleshooting in one place.
+Ride-verified on a 2024 W230. About 50 USD in parts, an evening on the
+bench, an hour on the bike, one ride to calibrate.
 
-## Why
+**Owner? Start with the [end-to-end owner's guide](docs/owner-guide.md).**
+Why it exists and what "done" means: [press release and FAQ](docs/press-release-faq.md).
 
-The W230's cluster has no gear digit. The ECU has no gear register either (a
-full scan of the diagnostic services confirmed it), so the gear has to be
-inferred: RPM divided by speed is a constant per gear, and the neutral switch
-covers the one case the ratio cannot.
+## What you get
+
+| Moment | What the indicator does |
+|---|---|
+| Pulling away | Green **N** while in neutral; the digit the instant you're in gear |
+| Every shift | Cyan digit follows within a beat (the ECU is polled ~3×/s) |
+| Cruising | Right gear at steady speed from day one; locks in faster once learned |
+| Stopped, coasting, clutch in | A dim dash: there is no honest answer, so it shows none |
+| Launching with clutch slip | **1**, so a slipping clutch never reads as a wrong gear |
+| Key off / bus asleep | All red, so a dead link is never mistaken for neutral |
 
 ## How it works
 

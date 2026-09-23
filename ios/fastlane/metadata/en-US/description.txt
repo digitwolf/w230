@@ -1,33 +1,26 @@
-The Kawasaki W230 has no gear indicator. This app is the companion to an open-source one you build yourself: a postage-stamp-sized LED matrix on the tank or triple clamp that shows N and 1–6, plugged into the bike's diagnostic connector. It reads only (it never writes to the ECU) and learns your bike's exact gear ratios as you ride.
+You pull away from a light and the bike stalls: it was in second. At highway speed you go for a seventh gear that does not exist. Through town you lug the little single in sixth. The Kawasaki W230's cluster shows no gear, Kawasaki sells no indicator for it, and universal aftermarket units need a button-pressing calibration ride per gear and splice into your wiring.
 
-THE WHOLE JOURNEY
+This app is the companion to the open-source W230 gear indicator: a matchbox-sized LED matrix that shows N and 1–6, right from the first ride, without cutting a factory wire or writing anything to the ECU. It listens to the diagnostic connector the dealer uses, infers the gear from engine and road speed, and learns your bike's exact ratios as you ride. About 50 USD in parts, an evening on the bench, an hour on the bike.
 
-1. Build it. About 50 USD of parts: an M5Stack ATOM Matrix, a LIN transceiver module, a small 12 V to 5 V converter, a diode and a fuse. The wiring is eight connections; the guide walks through every one.
+WHAT YOU GET AT THE HANDLEBAR
+• Green N while in neutral, the digit the moment you're in gear.
+• Cyan 1–6 following every shift within a beat.
+• The right gear at cruise from day one; faster and surer once it has learned your bike (tyres and speedo error included).
+• A dim dash when there is no honest answer (stopped, coasting with the clutch in) instead of a guess, and 1 while launching on a slipping clutch.
+• All red when the bike is off, so a dead link is never mistaken for neutral.
 
-2. Flash it once over USB. After that, the indicator updates itself over WiFi from this app.
+WHAT THE APP ANSWERS
+"Is it right?" Gear: the live digit next to rpm, speed, the neutral switch and where the current ratio sits against the six gear bands. Calibration: factory versus learned bands for each gear, the ratio histogram and its peaks, with a wipe-and-relearn button.
 
-3. Install it on the bike: tap the K-line at the KDS diagnostic plug, take fused switched 12 V, tap the neutral-switch wire through the diode, mount the matrix where you can glance at it.
+"Why was it wrong?" Troubleshoot: automatic checks written from the bring-up on a real W230 (wiring, power, the neutral diode, learning gates), the display legend, and a one-tap diagnostic export to attach when asking for help. Diagnostics: firmware and partition state, memory, the ride black box (reboots, brownouts, link drops, why samples were or weren't counted) and the event log.
 
-4. Ride. On day one the digits come from Kawasaki's published ratios and are already right most of the time. After a minute in each gear the indicator has learned your bike, tyres and speedo error included, and the digit locks in faster.
+"Do I need the laptop again?" No. Update: give the indicator your 2.4 GHz WiFi once; it then checks for firmware at ignition-on (or when you ask), shows the release notes, installs while you're parked, verifies every image, and rolls back by itself if a new version fails its self-test. Nothing installs unattended unless you choose that.
 
-WHAT THE APP DOES
-
-• Gear: the live digit, rpm, speed, neutral switch and K-line state, and where the current ratio sits against the six gear bands.
-• Diagnostics: firmware version and partition state, free memory, the ride black box (reboots, brownouts, link drops, which samples were accepted for learning and why not), and the indicator's event log.
-• Calibration: factory versus learned bands for every gear, the ratio histogram with its detected peaks, CSV export, and a wipe button.
-• Troubleshoot: automatic checks written from the bring-up experience on a real W230, covering wiring, power, the neutral diode and the learning gates, plus a one-tap diagnostic export for asking for help.
-• Update: WiFi setup, check and install firmware updates, choose whether the indicator checks at ignition-on, and a demo mode that shows every screen with data recorded on a real ride.
-
-UPDATES YOU CAN TRUST
-
-The indicator downloads updates over HTTPS, verifies the checksum before activating them, refuses to update while the bike is moving, and runs new firmware on probation: if it fails its self-test, the previous version boots instead. Nothing installs unattended unless you choose that policy.
+BEFORE YOU BUILD
+Open the connection sheet and tap "Try the demo": every screen fills with data recorded on a real ride, so you can see what you'd get.
 
 PRIVACY
-
-The app talks only to your indicator over Bluetooth. No accounts, no analytics, no data collection. WiFi credentials are sent over the encrypted Bluetooth link and stored only on the indicator.
+The app talks only to your indicator over Bluetooth. No accounts, no analytics, no data collection. WiFi credentials travel over the encrypted Bluetooth link and are stored only on the indicator.
 
 REQUIRES THE HARDWARE
-
-The app is useless without the indicator. Parts list, wiring, firmware and the owner's guide are free at github.com/digitwolf/w230. Open the connection sheet and tap "Try the demo" to explore the app before you build.
-
-The gear shown is inferred from rpm and speed. It is a rider aid, not a substitute for knowing what gear you are in.
+The indicator is open source: parts list, wiring, firmware and the owner's guide are free at github.com/digitwolf/w230. The gear shown is inferred from rpm and speed; it is a rider aid, not a substitute for knowing what gear you're in.

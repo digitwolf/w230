@@ -1,1 +1,1 @@
-First release. Live gear and readings, diagnostics and ride black box, calibration histogram, guided troubleshooting with export, WiFi setup and over-the-air firmware updates with rollback, and a demo mode for exploring the app before building the indicator.
+First release: know your gear on the W230 and know it can be trusted. Live gear and readings, calibration with learned bands and histogram, guided troubleshooting with export, ride black box, WiFi setup and over-the-air firmware updates with rollback, plus a demo mode to explore before you build.

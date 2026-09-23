@@ -1,1 +1,1 @@
-Build the open-source gear indicator for your Kawasaki W230, then let the app show what it sees, calibrate it and keep its firmware current over WiFi.
+No more stalls in second or hunting for a seventh gear: the gear number the W230 should have shipped with, and the app that tells you it can be trusted.

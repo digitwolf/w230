@@ -10,17 +10,41 @@ the other documents in this folder; this one only tells you what to do.
 Time budget: an evening for the electronics, an hour on the bike, one ride
 to calibrate.
 
-## 1. What you get
+## 1. Why you'd want this
 
-A 25-LED matrix the size of a postage stamp that shows the current gear:
-green **N**, cyan **1–6**, a dim dash while stopped or coasting, all red when
-the bike is off. It plugs into the diagnostic connector the dealer uses,
-reads only (it never writes to the ECU), and learns your bike's exact gear
-ratios as you ride. The iPhone app shows what the indicator sees, helps you
-troubleshoot, and installs firmware updates over WiFi.
+Three moments every W230 rider knows: the stall pulling away because it was
+in second, the reach for a seventh gear at highway speed, the lugging in
+sixth through town. The cluster cannot help; it shows no gear. Kawasaki
+sells no indicator for this bike, and universal aftermarket units want a
+button-pressing calibration ride per gear, splice into speed and tach
+wires, and drift.
 
-It is a rider aid. The gear it shows is inferred from rpm and speed; treat it
-like a helpful passenger, not like the gearbox.
+This indicator is the number the bike should have shipped with:
+
+- **Right from the first ride.** The digits start from Kawasaki's own gear
+  ratios, then it learns *your* bike (tyres, speedo error and all) after a
+  minute in each gear.
+- **Honest when it can't know.** Stopped, coasting with the clutch in, or
+  launching on a slipping clutch there is no true answer, so it shows a dash
+  (or **1** for the launch) rather than a guess.
+- **Reversible and read-only.** It listens on the diagnostic plug like a
+  dealer's tester, writes nothing to the ECU, cuts no factory wire, and
+  comes off in ten minutes.
+- **Answers "is it right?"** The iPhone app shows what it sees, what it has
+  learned and what went wrong, and updates the firmware over WiFi so the
+  laptop is needed exactly once.
+
+It is a rider aid: the gear is inferred from rpm and speed. Trust it the
+way you'd trust a good passenger calling the gear, not the way you trust
+the gear lever.
+
+**Is it for you?** If you can solder or crimp eight connections and follow a
+wiring picture, yes. No programming: two commands flash the firmware once.
+Budget about 50 USD, an evening on the bench, an hour on the bike.
+
+**What it won't do:** show a gear the instant the lever moves at a
+standstill (nothing on the bike reports that), work on 5 GHz-only WiFi, or
+survive rain without an enclosure.
 
 ## 2. Parts (about 40–60 USD)
 
