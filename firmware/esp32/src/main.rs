@@ -18,10 +18,15 @@
 //! All K-line traffic (TX frames, echoes, ECU replies) is hex-logged over USB:
 //! `espflash monitor` at 115200 to watch it.
 
+mod ble;
+mod config_store;
 mod kds;
 mod learn_store;
+mod ota;
 mod web;
 
+use ble::{Attr, Ble};
+use config_store::{ConfigStore, BOOT_CHECK, BOOT_CHECK_AND_INSTALL};
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::{PinDriver, Pull};
 use esp_idf_hal::prelude::*;
@@ -31,12 +36,40 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use kds::Kds;
 use learn_store::RatioLearner;
 use log::{info, warn};
+use ota::{OtaHandle, OtaRequest};
 use smart_leds::SmartLedsWrite;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use w230_core::ble_proto::{
+    self as proto, Command, EventRing, LiveStatus, OtaState, OtaStatus, WifiStatus,
+};
 use w230_core::display;
 use w230_core::gear::{Gear, GearEstimator, GearInputs};
 use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
+
+/// Firmware version, from esp32/Cargo.toml (build.rs keeps sdkconfig's
+/// CONFIG_APP_PROJECT_VER identical so the image descriptor agrees).
+const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
+const HARDWARE: &str = "atom-matrix";
+/// Where releases live. `scripts/release.sh` publishes here; the app can
+/// point a device at a staging manifest instead (Settings → manifest URL).
+const OTA_MANIFEST_URL: &str = match option_env!("W230_OTA_MANIFEST_URL") {
+    Some(u) => u,
+    None => "https://d2ilb6j4crje4c.cloudfront.net/w230/manifest.json",
+};
+/// Boot-time update behaviour when nothing is stored yet: check only, never
+/// install unattended (a reboot at key-on is not what a rider expects).
+const DEFAULT_BOOT_POLICY: u8 = BOOT_CHECK;
+/// Boot check waits this long so the gear display comes up first.
+const BOOT_CHECK_DELAY: Duration = Duration::from_secs(8);
+/// A freshly updated image must survive this long, with the LED thread and
+/// BLE up and the poll loop cycling, before its rollback is cancelled.
+const SELF_TEST_UPTIME: Duration = Duration::from_secs(20);
+/// JSON attributes are refreshed at this rate while a phone is connected.
+const BLE_SLOW_PUBLISH: Duration = Duration::from_secs(1);
+/// After a failed install the red cross stays up this long.
+const OTA_FAIL_SHOW: Duration = Duration::from_secs(4);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
@@ -115,6 +148,7 @@ fn main() -> anyhow::Result<()> {
     info!("W230 gear indicator starting (ATOM Matrix + LINTTL3/TJA1021)");
 
     let p = Peripherals::take()?;
+    let (wifi_modem, bt_modem) = p.modem.split();
 
     // --- LED matrix: 25x WS2812 on GPIO27, driven from CPU core 1 ---
     // WiFi interrupts live on core 0 and preempt the RMT refill ISR there,
@@ -184,21 +218,68 @@ fn main() -> anyhow::Result<()> {
     let mut learner = RatioLearner::new(nvs);
     learner.dump(); // post-ride diagnostic: full histogram in the boot log
 
-    // --- WiFi hotspot + HTTP diagnostic dashboard (compile-gated) ---
-    let webdiag = if WIFI_DIAG {
-        let sysloop = EspSystemEventLoop::take()?;
-        Some(web::start(p.modem, sysloop, nvs_part)?)
-    } else {
-        info!("WiFi diagnostics disabled — full CPU dedicated to gear display");
-        None
+    // --- User settings (WiFi credentials, update policy, brightness) ---
+    let config = Arc::new(Mutex::new(ConfigStore::open(
+        nvs_part.clone(),
+        DEFAULT_BOOT_POLICY,
+    )?));
+    let sysloop = EspSystemEventLoop::take()?;
+
+    // --- BLE GATT service for the iOS app ---
+    // Failure here is logged, not fatal: the gear display must not depend
+    // on the phone link. (No BLE also means no self-test pass → a bad OTA
+    // image that breaks Bluetooth rolls back, which is the intent.)
+    let ble = match Ble::start(bt_modem, nvs_part.clone()) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            warn!("BLE: start failed: {e} — continuing without the app link");
+            None
+        }
     };
+
+    // --- WiFi: either the legacy softAP dashboard or the OTA station ---
+    let (webdiag, ota) = if WIFI_DIAG {
+        info!("WIFI_DIAG on: softAP dashboard replaces OTA for this build");
+        (Some(web::start(wifi_modem, sysloop, nvs_part)?), None)
+    } else {
+        let ota = match ota::spawn(
+            wifi_modem,
+            sysloop,
+            nvs_part,
+            config.clone(),
+            OTA_MANIFEST_URL,
+            FW_VERSION,
+        ) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                warn!("OTA: worker start failed: {e} — updates unavailable this boot");
+                None
+            }
+        };
+        (None, ota)
+    };
+    let boot_slot_info = ota.as_ref().map(|o| {
+        let sh = o.shared.lock().unwrap();
+        (
+            sh.slot.clone(),
+            sh.pending_verify,
+            sh.rolled_back_from.clone(),
+        )
+    });
+    info!(
+        "W230 firmware {FW_VERSION} (BLE proto {}), slot {:?}",
+        proto::PROTOCOL_VERSION,
+        boot_slot_info
+    );
 
     let mut estimator = GearEstimator::new();
     // Factory-provisional bands: digits work with zero calibration; learned
     // bands replace them below as soon as riding data yields peaks.
     estimator.set_bands(w230_core::gear::FACTORY_BANDS, w230_core::gear::NUM_GEARS);
-    if let Some((bands, _)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
+    let mut learned_count = 0usize;
+    if let Some((bands, n)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
         estimator.set_bands(bands, w230_core::gear::NUM_GEARS);
+        learned_count = n;
     }
 
     let demo_start = Instant::now();
@@ -207,7 +288,8 @@ fn main() -> anyhow::Result<()> {
     let mut last_learn_save = Instant::now();
     let mut diag_regs: Option<Vec<(u8, Vec<u8>)>> = None;
     let mut deep_watch: Option<Vec<(u16, Vec<u8>)>> = None;
-    let mut brightness_idx: usize = 1;
+    let mut brightness_idx: usize =
+        (config.lock().unwrap().cfg.brightness_idx as usize).min(BRIGHTNESS_STEPS.len() - 1);
     let mut button_was_down = false;
     let mut button_down_at = Instant::now();
     let mut neutral_was_active = false;
@@ -223,7 +305,172 @@ fn main() -> anyhow::Result<()> {
     // interrupt jitter (random glitch pixels), so only rewrite on change.
     let mut last_frame: Option<[rgb::RGB8; 25]> = None;
 
+    // --- BLE / OTA bookkeeping ---
+    let boot = Instant::now();
+    let mut events = EventRing::default();
+    events.push(0, format!("boot fw {FW_VERSION}"));
+    if let Some((slot, pending, rolled)) = &boot_slot_info {
+        events.push(
+            0,
+            format!(
+                "slot {slot}{}",
+                if *pending { " pending-verify" } else { "" }
+            ),
+        );
+        if let Some(r) = rolled {
+            events.push(0, format!("rolled back from {r}"));
+        }
+    }
+    let mut last_slow_publish = Instant::now() - BLE_SLOW_PUBLISH;
+    let mut published: PublishedCache = Default::default();
+    let mut boot_check_done = false;
+    let mut self_test_done = boot_slot_info.as_ref().map_or(true, |(_, p, _)| !*p);
+    let mut ota_status = OtaStatus::default();
+    let mut wifi_status = WifiStatus::default();
+    let mut ota_fail_until: Option<Instant> = None;
+    let mut ota_was_busy = false;
+    let mut link_was_up = false;
+
     loop {
+        let uptime_s = boot.elapsed().as_secs() as u32;
+
+        // --- OTA state: mirror worker → BLE/events, drive the display ---
+        if let Some(o) = &ota {
+            let mut sh = o.shared.lock().unwrap();
+            if sh.changed {
+                sh.changed = false;
+                if sh.ota.state != ota_status.state {
+                    events.push(uptime_s, format!("ota {}", sh.ota.state.as_str()));
+                    if let Some(e) = &sh.ota.error {
+                        events.push(
+                            uptime_s,
+                            format!("ota: {}", e.chars().take(40).collect::<String>()),
+                        );
+                    }
+                    if sh.ota.state == OtaState::Failed {
+                        ota_fail_until = Some(Instant::now() + OTA_FAIL_SHOW);
+                    }
+                }
+                if sh.wifi.state != wifi_status.state {
+                    events.push(uptime_s, format!("wifi {}", sh.wifi.state.as_str()));
+                }
+                ota_status = sh.ota.clone();
+                wifi_status = sh.wifi.clone();
+                drop(sh);
+                if let Some(b) = &ble {
+                    b.notify(
+                        Attr::OtaStatus,
+                        proto::ota_status_json(&ota_status).as_bytes(),
+                    );
+                    b.notify(
+                        Attr::WifiStatus,
+                        proto::wifi_status_json(&wifi_status).as_bytes(),
+                    );
+                }
+            }
+        }
+        // While an image is being written the K-line polling pauses (the
+        // download needs the CPU and the bike must be stationary anyway);
+        // the matrix shows the download as a blue fill, then a check/cross.
+        let ota_busy = matches!(
+            ota_status.state,
+            OtaState::Downloading | OtaState::Verifying | OtaState::Rebooting
+        );
+        if ota_busy {
+            if !ota_was_busy {
+                kds.connected = false;
+                learner.save();
+            }
+            ota_was_busy = true;
+            let frame = if ota_status.state == OtaState::Rebooting {
+                display::render_ota_result(true, BRIGHTNESS_STEPS[brightness_idx])
+            } else {
+                display::render_progress(ota_status.progress, BRIGHTNESS_STEPS[brightness_idx])
+            };
+            if last_frame != Some(frame) {
+                let _ = led_tx.try_send(frame);
+                last_frame = Some(frame);
+            }
+            handle_ble_commands(
+                &ble,
+                &ota,
+                &config,
+                &mut learner,
+                &mut estimator,
+                &mut brightness_idx,
+                &mut events,
+                uptime_s,
+            );
+            FreeRtos::delay_ms(100);
+            continue;
+        }
+        ota_was_busy = false;
+        if let Some(until) = ota_fail_until {
+            if Instant::now() < until {
+                let frame = display::render_ota_result(false, BRIGHTNESS_STEPS[brightness_idx]);
+                if last_frame != Some(frame) {
+                    let _ = led_tx.try_send(frame);
+                    last_frame = Some(frame);
+                }
+                FreeRtos::delay_ms(100);
+                continue;
+            }
+            ota_fail_until = None;
+        }
+
+        // Boot-time update check: once, after the display is up, only when
+        // credentials exist, and never while this image is still on probation.
+        if !boot_check_done && boot.elapsed() >= BOOT_CHECK_DELAY {
+            boot_check_done = true;
+            let (policy, has_wifi) = {
+                let c = config.lock().unwrap();
+                (c.cfg.boot_policy, c.cfg.ssid.is_some())
+            };
+            if let Some(o) = &ota {
+                if policy >= BOOT_CHECK && has_wifi && self_test_done {
+                    info!("OTA: boot-time check (policy {policy})");
+                    o.request(OtaRequest::Check {
+                        install: policy == BOOT_CHECK_AND_INSTALL,
+                    });
+                } else if policy >= BOOT_CHECK && has_wifi {
+                    info!("OTA: boot check skipped — image pending verification");
+                }
+            }
+        }
+
+        // Rollback self-test: the update image has run long enough with the
+        // display thread, BLE and the poll loop all alive → keep it.
+        if !self_test_done && boot.elapsed() >= SELF_TEST_UPTIME {
+            self_test_done = true;
+            let healthy = ble.is_some()
+                && led_tx
+                    .try_send(last_frame.unwrap_or([rgb::RGB8::default(); 25]))
+                    .is_ok();
+            if healthy {
+                if let Some(o) = &ota {
+                    o.request(OtaRequest::MarkValid);
+                }
+                events.push(uptime_s, "self-test passed");
+            } else {
+                warn!(
+                    "SELF-TEST failed (ble={}), leaving rollback armed",
+                    ble.is_some()
+                );
+                events.push(uptime_s, "self-test FAILED");
+            }
+        }
+
+        handle_ble_commands(
+            &ble,
+            &ota,
+            &config,
+            &mut learner,
+            &mut estimator,
+            &mut brightness_idx,
+            &mut events,
+            uptime_s,
+        );
+
         // Button: short press cycles brightness, 3s hold wipes calibration.
         let down = button.is_low();
         if down && !button_was_down {
@@ -234,9 +481,11 @@ fn main() -> anyhow::Result<()> {
                 learner.clear();
                 estimator.clear_bands();
                 info!("LEARN: calibration wiped (button hold)");
+                events.push(uptime_s, "calibration wiped (button)");
             } else {
                 brightness_idx = (brightness_idx + 1) % BRIGHTNESS_STEPS.len();
                 info!("brightness -> {}", BRIGHTNESS_STEPS[brightness_idx]);
+                config.lock().unwrap().set_brightness(brightness_idx as u8);
             }
         }
         button_was_down = down;
@@ -385,6 +634,7 @@ fn main() -> anyhow::Result<()> {
                 prev_rpm = None;
                 learner.note_link_drop();
                 learner.save(); // key-off is how rides end — don't lose the tail
+                events.push(uptime_s, "k-line dropped");
             } else {
                 link_up = true;
                 // Learning gate: the G23 neutral wire ONLY. Reg 0x03 reads
@@ -405,10 +655,15 @@ fn main() -> anyhow::Result<()> {
             last_learn_save = Instant::now();
             if learner.save() {
                 learn_flash_until = Instant::now() + Duration::from_millis(800);
-                if let Some((bands, _)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
+                if let Some((bands, n)) = learner.derive_bands(&w230_core::gear::FACTORY_BANDS) {
                     estimator.set_bands(bands, w230_core::gear::NUM_GEARS);
+                    learned_count = n;
                 }
             }
+        }
+
+        if estimator.bands().is_none() {
+            learned_count = 0;
         }
 
         // Neutral: the G23 switch wire only (LOW = neutral).
@@ -482,7 +737,252 @@ fn main() -> anyhow::Result<()> {
             s.hist.extend_from_slice(learner.hist());
         }
 
+        // --- BLE telemetry ---
+        if link_up != link_was_up {
+            link_was_up = link_up;
+            events.push(uptime_s, if link_up { "k-line up" } else { "k-line down" });
+        }
+        if let Some(b) = &ble {
+            if let Some(o) = &ota {
+                o.shared.lock().unwrap().moving = speed.is_some_and(|s| s >= 1.0);
+            }
+            if b.live_subscribed() {
+                let live = LiveStatus {
+                    link_up,
+                    neutral_switch: neutral_active,
+                    interlock,
+                    learn_flash: Instant::now() < learn_flash_until,
+                    ota_busy: ota_status.state.is_busy(),
+                    demo: DEMO_MODE,
+                    gear,
+                    brightness_idx: brightness_idx as u8,
+                    rpm,
+                    speed,
+                    samples: learner.samples(),
+                    uptime_s,
+                };
+                b.notify(Attr::Live, &live.encode());
+            }
+            if b.connections() > 0 && last_slow_publish.elapsed() >= BLE_SLOW_PUBLISH {
+                last_slow_publish = Instant::now();
+                let cfg = config.lock().unwrap();
+                let (slot, pending, _) = boot_slot_info.clone().unwrap_or_default();
+                let mac = mac_string();
+                let info = proto::DeviceInfo {
+                    fw_version: FW_VERSION,
+                    project: w230_core::ota_manifest::PROJECT_NAME,
+                    idf_version: idf_version(),
+                    built: BUILD_STAMP,
+                    hardware: HARDWARE,
+                    slot: if slot.is_empty() { "factory" } else { &slot },
+                    ota_capable: ota.is_some() && slot.starts_with("ota_"),
+                    pending_verify: pending && !self_test_done,
+                    boot_policy: cfg.cfg.boot_policy,
+                    uptime_s,
+                    free_heap: unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
+                    min_free_heap: learner.min_free_heap(),
+                    reset_reason: learner.reset_reason(),
+                    mac: &mac,
+                    ble_connections: b.connections(),
+                };
+                let settings = proto::Settings {
+                    brightness_idx: brightness_idx as u8,
+                    brightness_steps: &BRIGHTNESS_STEPS,
+                    boot_policy: cfg.cfg.boot_policy,
+                    manifest_url: cfg.cfg.manifest_url.as_deref().unwrap_or(OTA_MANIFEST_URL),
+                    manifest_url_is_default: cfg.cfg.manifest_url.is_none(),
+                    wifi_ssid: cfg.cfg.ssid.as_deref(),
+                };
+                published.publish_if_changed(b, Attr::DeviceInfo, proto::device_info_json(&info));
+                published.publish_if_changed(b, Attr::Settings, proto::settings_json(&settings));
+                published.publish_if_changed(
+                    b,
+                    Attr::BlackBox,
+                    proto::black_box_json(&learner.black_box()),
+                );
+                published.publish_if_changed(
+                    b,
+                    Attr::Calibration,
+                    proto::calibration_json(
+                        estimator.bands(),
+                        learned_count,
+                        learner.samples(),
+                        &learner.peaks(),
+                    ),
+                );
+                published.publish_if_changed(b, Attr::Events, events.to_json());
+                published.publish_if_changed(
+                    b,
+                    Attr::OtaStatus,
+                    proto::ota_status_json(&ota_status),
+                );
+                published.publish_if_changed(
+                    b,
+                    Attr::WifiStatus,
+                    proto::wifi_status_json(&wifi_status),
+                );
+                // Histogram pages are cheap to compare as bytes.
+                let h0 = proto::hist_page(learner.hist(), learner.samples(), 0);
+                let h1 = proto::hist_page(learner.hist(), learner.samples(), 1);
+                published.publish_bytes_if_changed(b, Attr::Hist0, h0);
+                published.publish_bytes_if_changed(b, Attr::Hist1, h1);
+            }
+        }
+
         cycle = cycle.wrapping_add(1);
         FreeRtos::delay_ms(POLL_INTERVAL.as_millis() as u32);
+    }
+}
+
+/// Compile-time build stamp for the device-info attribute.
+const BUILD_STAMP: &str = match option_env!("W230_BUILD_STAMP") {
+    Some(s) => s,
+    None => "dev",
+};
+
+fn idf_version() -> &'static str {
+    // e.g. "v5.3.3" — from the linked ESP-IDF, not the crate.
+    static VER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VER.get_or_init(|| unsafe {
+        let p = esp_idf_svc::sys::esp_get_idf_version();
+        if p.is_null() {
+            "unknown".into()
+        } else {
+            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    })
+}
+
+fn mac_string() -> String {
+    let mut mac = [0u8; 6];
+    unsafe {
+        esp_idf_svc::sys::esp_read_mac(
+            mac.as_mut_ptr(),
+            esp_idf_svc::sys::esp_mac_type_t_ESP_MAC_BT,
+        );
+    }
+    format!(
+        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Last value pushed per attribute, so unchanged JSON isn't rewritten into
+/// the GATT table every second.
+#[derive(Default)]
+struct PublishedCache {
+    strings: std::collections::HashMap<u8, String>,
+    bytes: std::collections::HashMap<u8, Vec<u8>>,
+}
+
+impl PublishedCache {
+    fn publish_if_changed(&mut self, ble: &Ble, attr: Attr, value: String) {
+        let key = attr as u8;
+        if self.strings.get(&key) != Some(&value) {
+            ble.publish(attr, value.as_bytes());
+            self.strings.insert(key, value);
+        }
+    }
+
+    fn publish_bytes_if_changed(&mut self, ble: &Ble, attr: Attr, value: Vec<u8>) {
+        let key = attr as u8;
+        if self.bytes.get(&key) != Some(&value) {
+            ble.publish(attr, &value);
+            self.bytes.insert(key, value);
+        }
+    }
+}
+
+/// Drain app commands and WiFi credentials from the BLE channels.
+#[allow(clippy::too_many_arguments)]
+fn handle_ble_commands(
+    ble: &Option<Ble>,
+    ota: &Option<OtaHandle>,
+    config: &Arc<Mutex<ConfigStore>>,
+    learner: &mut RatioLearner,
+    estimator: &mut GearEstimator,
+    brightness_idx: &mut usize,
+    events: &mut EventRing,
+    uptime_s: u32,
+) {
+    let Some(b) = ble else { return };
+    while let Ok(creds) = b.wifi_credentials.try_recv() {
+        config.lock().unwrap().set_wifi(&creds.ssid, &creds.psk);
+        events.push(uptime_s, format!("wifi set: {}", creds.ssid));
+        if let Some(o) = ota {
+            o.request(OtaRequest::TestWifi);
+        }
+    }
+    while let Ok(cmd) = b.commands.try_recv() {
+        match cmd {
+            Command::WipeCalibration => {
+                learner.clear();
+                estimator.clear_bands();
+                info!("LEARN: calibration wiped (app)");
+                events.push(uptime_s, "calibration wiped (app)");
+            }
+            Command::SetBrightness(i) => {
+                let i = (i as usize).min(BRIGHTNESS_STEPS.len() - 1);
+                *brightness_idx = i;
+                config.lock().unwrap().set_brightness(i as u8);
+                info!("brightness -> {} (app)", BRIGHTNESS_STEPS[i]);
+            }
+            Command::CheckUpdate => {
+                events.push(uptime_s, "app: check update");
+                match ota {
+                    Some(o) => o.request(OtaRequest::Check { install: false }),
+                    None => warn!("OTA: unavailable (WIFI_DIAG build or worker failed)"),
+                }
+            }
+            Command::InstallUpdate => {
+                events.push(uptime_s, "app: install update");
+                if let Some(o) = ota {
+                    o.request(OtaRequest::Install);
+                }
+            }
+            Command::SetBootPolicy(p) => {
+                config.lock().unwrap().set_boot_policy(p);
+                events.push(uptime_s, format!("boot policy {p}"));
+            }
+            Command::Reboot => {
+                info!("reboot requested by app");
+                learner.save();
+                FreeRtos::delay_ms(300);
+                esp_idf_hal::reset::restart();
+            }
+            Command::ForgetWifi => {
+                config.lock().unwrap().clear_wifi();
+                events.push(uptime_s, "wifi forgotten");
+                if let Some(o) = ota {
+                    let mut sh = o.shared.lock().unwrap();
+                    sh.wifi = WifiStatus::default();
+                    sh.changed = true;
+                }
+            }
+            Command::ClearBlackBox => {
+                learner.clear_black_box();
+                events.push(uptime_s, "black box cleared");
+            }
+            Command::SetManifestUrl(url) => {
+                config.lock().unwrap().set_manifest_url(if url.is_empty() {
+                    None
+                } else {
+                    Some(&url)
+                });
+                events.push(
+                    uptime_s,
+                    if url.is_empty() {
+                        "manifest url: default"
+                    } else {
+                        "manifest url: custom"
+                    },
+                );
+            }
+            Command::TestWifi => {
+                if let Some(o) = ota {
+                    o.request(OtaRequest::TestWifi);
+                }
+            }
+        }
     }
 }

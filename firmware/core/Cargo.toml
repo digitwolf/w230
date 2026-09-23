@@ -1,14 +1,17 @@
 [package]
 name = "w230-core"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["digitwolf"]
 edition = "2021"
 rust-version = "1.77"
 license = "MIT"
 repository = "https://github.com/digitwolf/w230"
-description = "Hardware-independent logic for the W230 gear indicator: KDS protocol framing, gear estimation, ratio learning, display rendering"
+description = "Hardware-independent logic for the W230 gear indicator: KDS protocol framing, gear estimation, ratio learning, display rendering, BLE/OTA wire formats"
 
 [dependencies]
 log = "0.4"
 # Same RGB8 type smart-leds re-exports, without pulling in any HAL.
 rgb = "0.8"
+# OTA manifest parsing only; the BLE JSON bodies are hand-built (see ble_proto.rs).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -2,3 +2,40 @@
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# --- Flash + OTA layout ---------------------------------------------------
+# ATOM Matrix = ESP32-PICO-D4 with 4 MB embedded flash. Two OTA slots; the
+# exact table flashed is firmware/partitions.csv (scripts/flash.sh).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_TWO_OTA=y
+# New images boot as PENDING_VERIFY; main.rs marks them valid after its
+# self-test, otherwise the bootloader rolls back on the next reset.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Version stamped into the image's app descriptor (checked by build.rs
+# against esp32/Cargo.toml and by the OTA path against the manifest).
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="0.2.0"
+
+# --- TLS for the update download -----------------------------------------
+# Built-in x509 bundle (common roots incl. Amazon) instead of a pinned cert,
+# so a CloudFront/S3 certificate rotation never bricks updates.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
+# --- Bluetooth LE (Bluedroid, GATT server only) --------------------------
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=n
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_SMP_ENABLE=y
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+CONFIG_BT_BTC_TASK_STACK_SIZE=6144
+# Controller stays on core 0 (default) — the WS2812 RMT ISR lives on core 1.
+CONFIG_BTDM_CTRL_PINNED_TO_CORE_0=y
+# BLE stays up while WiFi downloads an update.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

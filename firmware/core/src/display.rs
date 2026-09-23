@@ -15,12 +15,15 @@ const GLYPH_4: [u8; 5] = [0b01010, 0b01010, 0b01110, 0b00010, 0b00010];
 const GLYPH_5: [u8; 5] = [0b01110, 0b01000, 0b01110, 0b00010, 0b01110];
 const GLYPH_6: [u8; 5] = [0b01110, 0b01000, 0b01110, 0b01010, 0b01110];
 const GLYPH_DASH: [u8; 5] = [0b00000, 0b00000, 0b01110, 0b00000, 0b00000];
+const GLYPH_CHECK: [u8; 5] = [0b00000, 0b00001, 0b00010, 0b10100, 0b01000];
+const GLYPH_CROSS: [u8; 5] = [0b10001, 0b01010, 0b00100, 0b01010, 0b10001];
 
 const GREEN: RGB8 = RGB8::new(0, 255, 40);
 const CYAN: RGB8 = RGB8::new(0, 180, 255);
 const DIM_RED: RGB8 = RGB8::new(120, 10, 0);
 const DIM_GREEN: RGB8 = RGB8::new(0, 140, 20);
 const STATUS_RED: RGB8 = RGB8::new(255, 0, 0);
+const BLUE: RGB8 = RGB8::new(0, 40, 255);
 const OFF: RGB8 = RGB8::new(0, 0, 0);
 
 /// Render the gear into a 25-pixel row-major frame buffer.
@@ -44,6 +47,36 @@ pub fn render(gear: Gear, link_up: bool, brightness: u8, learn_flash: bool) -> [
         _ => (&GLYPH_DASH, dash_colour),
     };
 
+    let mut px = [OFF; 25];
+    for (row, mask) in glyph.iter().enumerate() {
+        for col in 0..5 {
+            if mask & (1 << (4 - col)) != 0 {
+                px[row * 5 + col] = scale(colour, brightness);
+            }
+        }
+    }
+    px
+}
+
+/// OTA progress: fill the matrix row by row (top-left first) in blue,
+/// `percent` 0..=100 → 0..=25 lit pixels. A blue matrix is unambiguous on the
+/// bike: nothing in normal operation is blue.
+pub fn render_progress(percent: u8, brightness: u8) -> [RGB8; 25] {
+    let lit = (percent.min(100) as usize * 25).div_ceil(100);
+    let mut px = [OFF; 25];
+    for p in px.iter_mut().take(lit) {
+        *p = scale(BLUE, brightness);
+    }
+    px
+}
+
+/// OTA outcome screen: green check on success, red cross on failure.
+pub fn render_ota_result(ok: bool, brightness: u8) -> [RGB8; 25] {
+    let (glyph, colour) = if ok {
+        (&GLYPH_CHECK, GREEN)
+    } else {
+        (&GLYPH_CROSS, STATUS_RED)
+    };
     let mut px = [OFF; 25];
     for (row, mask) in glyph.iter().enumerate() {
         for col in 0..5 {
@@ -120,6 +153,29 @@ mod tests {
         // Digits and N are never recoloured by the flash.
         let n = render(Gear::Neutral, true, 255, true);
         assert!(n.iter().filter(|p| **p != OFF).all(|p| *p == GREEN));
+    }
+
+    #[test]
+    fn progress_fills_top_left_first() {
+        assert_eq!(lit(&render_progress(0, 255)), 0);
+        let half = render_progress(50, 255);
+        assert_eq!(lit(&half), 13); // ceil(12.5)
+        assert_eq!(half[0], BLUE);
+        assert_eq!(half[12], BLUE);
+        assert_eq!(half[13], OFF);
+        assert_eq!(lit(&render_progress(100, 255)), 25);
+        assert_eq!(lit(&render_progress(200, 255)), 25); // clamped
+        assert_eq!(lit(&render_progress(100, 0)), 0);
+    }
+
+    #[test]
+    fn ota_result_glyphs() {
+        let ok = render_ota_result(true, 255);
+        assert!(ok.iter().filter(|p| **p != OFF).all(|p| *p == GREEN));
+        assert_eq!(lit(&ok), 5);
+        let bad = render_ota_result(false, 255);
+        assert!(bad.iter().filter(|p| **p != OFF).all(|p| *p == STATUS_RED));
+        assert_eq!(lit(&bad), 9);
     }
 
     #[test]

@@ -3,7 +3,9 @@ target = "xtensa-esp32-espidf"
 
 [target.xtensa-esp32-espidf]
 linker = "ldproxy"
-runner = "espflash flash --monitor"
+# scripts/flash.sh = espflash with the ESP-IDF bootloader (rollback support)
+# and the two-slot OTA partition table; stays at 115200 baud.
+runner = "scripts/flash.sh"
 rustflags = ["--cfg", "espidf_time64"]
 
 [unstable]

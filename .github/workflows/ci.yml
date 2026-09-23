@@ -46,3 +46,19 @@ jobs:
           ldproxy: true
       - name: build
         run: cargo build --release
+
+  ios:
+    name: iOS app build
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+      - name: xcodegen
+        run: brew install xcodegen && xcodegen generate
+      - name: build (no signing)
+        run: >-
+          xcodebuild -project W230.xcodeproj -scheme W230 -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build

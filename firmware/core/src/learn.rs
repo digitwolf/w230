@@ -160,11 +160,12 @@ impl RatioHistogram {
             .map(|(i, c)| (RATIO_MIN + i as f32 + 0.5, *c))
     }
 
-    /// Peak-detect the histogram and refine `reference` (factory) bands with
-    /// the learned peaks: each peak within [`ANCHOR_TOL`] of a factory band
-    /// replaces that gear's value. Returns the full band set plus how many
-    /// gears were refined; `None` until at least [`MIN_PEAKS`] gears anchor.
-    pub fn derive_bands(&self, reference: &[f32; NUM_GEARS]) -> Option<([f32; NUM_GEARS], usize)> {
+    /// Peak-detect the histogram: 1-2-1 smoothed local maxima with at least
+    /// [`MIN_PEAK_MASS`] raw samples in their 3-bin neighbourhood, de-duplicated
+    /// so no two peaks sit closer than [`PEAK_SEPARATION`]. Returned as
+    /// `(ratio centroid, mass)`, strongest first. This is the raw evidence
+    /// behind [`Self::derive_bands`] and what the diagnostic app shows.
+    pub fn peaks(&self) -> Vec<(f32, u32)> {
         let h = |j: isize| -> u32 {
             if (0..BINS as isize).contains(&j) {
                 self.hist[j as usize] as u32
@@ -172,7 +173,6 @@ impl RatioHistogram {
                 0
             }
         };
-        // 1-2-1 smoothed local maxima with enough raw mass around them.
         let smooth = |j: isize| h(j - 1) + 2 * h(j) + h(j + 1);
         let mut peaks: Vec<(f32, u32)> = Vec::new();
         for i in 0..BINS as isize {
@@ -200,6 +200,15 @@ impl RatioHistogram {
                 accepted.push((r, m));
             }
         }
+        accepted
+    }
+
+    /// Refine `reference` (factory) bands with the learned peaks: each peak
+    /// within [`ANCHOR_TOL`] of a factory band replaces that gear's value.
+    /// Returns the full band set plus how many gears were refined; `None`
+    /// until at least [`MIN_PEAKS`] gears anchor.
+    pub fn derive_bands(&self, reference: &[f32; NUM_GEARS]) -> Option<([f32; NUM_GEARS], usize)> {
+        let accepted = self.peaks();
         for (r, m) in &accepted {
             info!("LEARN: peak ratio {r:.1} (mass {m})");
         }

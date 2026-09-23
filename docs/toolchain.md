@@ -97,11 +97,17 @@ noise to update casually.
 The ATOM Matrix enumerates as a USB serial device (`/dev/ttyUSB0`).
 
 ```sh
-cargo run --release                # build + flash + attach monitor (runner = espflash)
+cargo run --release                # build + flash + attach monitor (runner = scripts/flash.sh)
 # or explicitly:
-espflash flash /dev/ttyUSB0 target/xtensa-esp32-espidf/release/w230-gear-indicator
+scripts/flash.sh target/xtensa-esp32-espidf/release/w230-gear-indicator
 espflash monitor --port /dev/ttyUSB0
 ```
+
+`scripts/flash.sh` wraps espflash with the ESP-IDF-built bootloader and the
+two-slot OTA partition table (`partitions.csv`) — both required for
+over-the-air updates and rollback (see [ota.md](ota.md)). A bare
+`espflash flash <elf>` still works but leaves the board on a single-app
+layout with OTA disabled. `ESPFLASH_PORT=/dev/ttyUSB1` selects the port.
 
 Hard-won rules:
 
@@ -116,8 +122,9 @@ Hard-won rules:
   runs, but no `/dev/ttyUSB0` appears. If `lsusb` shows no M5Stack bridge,
   swap the cable before debugging anything else. Label the known-good one.
 - Power the board from USB *or* the bike's 5 V — never both at once.
-- NVS (learned calibration + black box) **survives reflashing**; only
-  `espflash erase-flash` or the in-app wipes clear it.
+- NVS (learned calibration + black box + WiFi credentials + BLE bonds)
+  **survives reflashing**, including the one-time move to the OTA partition
+  table; only `espflash erase-flash` or the in-app wipes clear it.
 
 ## 6. Debugging workflow
 
@@ -147,10 +154,15 @@ timeout 15 espflash monitor --port /dev/ttyUSB0 --non-interactive | grep -E 'LEA
 ### Compile-gated diagnostics (`esp32/src/main.rs`)
 | Const | Purpose |
 |---|---|
-| `WIFI_DIAG` | softAP `W230-GEAR`/`w230diag`, dashboard at http://192.168.71.1/ (live JSON, histogram CSV, calibration wipe). Off by default — WiFi is the WS2812 glitch source and costs CPU/power |
+| `WIFI_DIAG` | legacy softAP `W230-GEAR`/`w230diag` dashboard at http://192.168.71.1/. Off by default; when on it takes the WiFi radio, so OTA is disabled for that build. Superseded by the BLE app |
 | `DIAG_SCAN` | scan all 0x21 registers, then change-watch them (how the clutch/interlock register was found) |
 | `DEEP_SCAN` | probe services 0x1A and 0x22 |
 | `DEMO_MODE` | cycle digits 1–6 on the display |
+
+### From the phone
+The iOS app (`ios/`) reads everything the boot log prints — black box,
+histogram, bands, events — live over BLE, plus WiFi/OTA state. Protocol in
+[ble-protocol.md](ble-protocol.md).
 
 ### On-bike controls
 - Button short press: brightness. Button 3 s hold: wipe learned calibration.

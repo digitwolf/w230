@@ -5,6 +5,7 @@
 
 use esp_idf_svc::nvs::{EspNvs, NvsDefault};
 use log::{info, warn};
+use w230_core::ble_proto::BlackBox;
 use w230_core::gear::NUM_GEARS;
 use w230_core::learn::{RatioHistogram, SampleOutcome, BINS, BLOB_LEN};
 
@@ -217,7 +218,46 @@ impl RatioLearner {
         }
     }
 
-    /// Wipe everything (long-press / web reset), debug tallies included.
+    /// The black box as the BLE app sees it.
+    pub fn black_box(&self) -> BlackBox {
+        BlackBox {
+            boots: self.debug.boots,
+            abnormal_resets: self.debug.abnormal_resets,
+            last_reset_reason: reset_reason_name(self.debug.last_reset_reason).to_string(),
+            link_drops: self.debug.link_drops,
+            min_free_heap: self.debug.min_free_heap,
+            interlock_odd: self.debug.interlock_odd,
+            interlock_last_odd: self.debug.interlock_last_odd as u16,
+            max_rpm: self.debug.max_rpm,
+            max_speed: self.debug.max_speed,
+            outcomes: self.debug.outcomes,
+        }
+    }
+
+    /// Human name of this boot's hardware reset reason.
+    pub fn reset_reason(&self) -> &'static str {
+        reset_reason_name(self.debug.last_reset_reason)
+    }
+
+    pub fn min_free_heap(&self) -> u32 {
+        self.debug.min_free_heap
+    }
+
+    /// Reset only the black-box tallies, keeping the learned histogram.
+    pub fn clear_black_box(&mut self) {
+        self.debug = RideDebug {
+            boots: 1,
+            ..RideDebug::default()
+        };
+        let _ = self.nvs.set_blob(NVS_DBG_KEY, &self.debug.to_blob());
+    }
+
+    /// Accepted histogram peaks (ratio, mass), strongest first.
+    pub fn peaks(&self) -> Vec<(f32, u32)> {
+        self.hist.peaks()
+    }
+
+    /// Wipe everything (long-press / app reset), debug tallies included.
     pub fn clear(&mut self) {
         self.hist.clear();
         self.debug = RideDebug::default();

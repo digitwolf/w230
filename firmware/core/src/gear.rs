@@ -37,8 +37,9 @@ const LAUNCH_MIN_RPM: f32 = 1100.0;
 /// tire wear — expect learned values a few percent off these).
 pub const FACTORY_BANDS: [f32; NUM_GEARS] = [196.9, 135.7, 102.1, 82.8, 68.3, 55.9];
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum Gear {
+    #[default]
     Unknown,
     Neutral,
     G(u8), // 1..=6

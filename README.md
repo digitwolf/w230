@@ -44,6 +44,18 @@ covers the one case the ratio cannot.
 
 Button: short press cycles brightness, 3 s hold wipes the learned calibration.
 
+## Companion app and updates
+
+An iOS app (`ios/`, SwiftUI + CoreBluetooth) connects over BLE and shows
+live telemetry, the ride black box, calibration bands and histogram, an
+event log and guided troubleshooting checks; it also provisions WiFi on the
+indicator and drives firmware updates. Updates are checked only at key-on
+(configurable) or on request, downloaded over HTTPS from an S3/CloudFront
+endpoint into the inactive OTA slot, hash- and header-verified, and roll
+back automatically if the new image fails its self-test. See
+[docs/ble-protocol.md](docs/ble-protocol.md), [docs/ota.md](docs/ota.md),
+[ios/README.md](ios/README.md) and [infra/README.md](infra/README.md).
+
 ## Hardware
 
 | Part | Role |

@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use esp_idf_hal::modem::Modem;
+use esp_idf_hal::modem::WifiModem;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::http::Method;
@@ -35,7 +35,7 @@ pub struct WebDiag {
 }
 
 pub fn start(
-    modem: Modem,
+    modem: WifiModem,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
 ) -> anyhow::Result<WebDiag> {
