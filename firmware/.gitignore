@@ -1,6 +1,2 @@
-.pio/
-.pioenvs/
-.piolibdeps/
-.vscode/
-*.bin
-*.elf
+/target/
+/.embuild/

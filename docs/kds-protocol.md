@@ -1,8 +1,9 @@
-# 06 — KDS/ISO-14230 protocol reference (as verified on the 2024–26 W230)
+# KDS / ISO-14230 protocol reference (as verified on the 2024–26 W230)
 
 The definitive wire-level description of how this firmware talks to the W230
 ECU. Every byte sequence below is a real capture from this bike. See
-`docs/05` §1–2 for the discovery history; `core/src/kds_proto.rs` implements
+[`bringup-learnings.md`](bringup-learnings.md) §1–2 for the discovery history;
+`firmware/core/src/kds_proto.rs` implements
 exactly this document and unit-tests it against these same bytes.
 
 ## 0. Physical layer
@@ -106,7 +107,7 @@ while the bike moves — a caller must treat refusal as "value unknown," never
 |---|---|---|---|
 | 0x09 RPM | 2 | `(hi<<8|lo) / 4` rpm | `1C 52` → 1812 rpm (tach ~1800) |
 | 0x0C speed | 1 | km/h, integer | `1E` → 30 km/h |
-| 0x03 interlock | 2 | `00 00` = neutral+clutch chain closed **or bike moving**; `FF FF` otherwise | see docs/05 §2 |
+| 0x03 interlock | 2 | `00 00` = neutral+clutch chain closed **or bike moving**; `FF FF` otherwise | see [bringup-learnings.md §2](bringup-learnings.md) |
 | 0x0A battery | 2 | ≈ value × 0.01 V | `02 76` → ~12.6 V |
 | 0x00/0x20/0x40… | 4 | supported-id bitmasks | `FF FF FF FF` |
 

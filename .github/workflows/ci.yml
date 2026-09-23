@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: Core tests (host)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware
+    env:
+      # rust-toolchain.toml pins the `esp` channel for the ESP32 build; the
+      # pure-logic crate builds on stable.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy -p w230-core --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+      - name: tests
+        run: cargo test -p w230-core --target x86_64-unknown-linux-gnu
+
+  firmware:
+    name: ESP32 firmware build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: true
+      - name: build
+        run: cargo build --release

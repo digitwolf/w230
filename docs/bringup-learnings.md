@@ -1,4 +1,4 @@
-# 05 — Bring-up learnings & final architecture (2024–26 W230, live-verified)
+# Bring-up learnings & architecture (2024–26 W230, live-verified)
 
 Everything below was established against the actual bike across bench and ride
 sessions in August 2026. Where a belief was overturned, the wrong version is
@@ -96,7 +96,7 @@ register mid-ride kept a launch-time value alive for a whole ride, twice.
 
 ## 4. Architecture
 
-Two-crate workspace in `firmware-rs/`:
+Two-crate workspace in `firmware/`:
 
 ```
 core/  (w230-core — pure logic, host-testable: `cargo test-host`)
@@ -107,7 +107,7 @@ core/  (w230-core — pure logic, host-testable: `cargo test-host`)
   display    5x5 glyph rendering (rgb::RGB8)
   diag       dashboard Snapshot + JSON/CSV wire formats
 
-firmware/  (w230-gear-indicator — the flashable binary)
+esp32/ (w230-gear-indicator — the flashable binary)
   kds         UART transport, fast-init timing, adaptive P3 pacing
   learn_store NVS persistence (3 s dirty-gated saves) + ride black box
   web         WiFi softAP + HTTP dashboard (compile-gated, WIFI_DIAG)

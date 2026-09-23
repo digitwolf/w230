@@ -1,9 +1,9 @@
 //! Gear determination with three prioritised sources:
 //!   1. Hardware neutral switch -> definitive "N", no debounce either way.
 //!   2. Direct KDS gear register (the W230 has none — kept for other models).
-//!   3. RPM/speed ratio classifier with per-gear bands, gated by the clutch
-//!      switch (ECU reg 0x03): with the lever pulled the engine is decoupled,
-//!      so the ratio is meaningless and classification pauses.
+//!   3. RPM/speed ratio classifier with per-gear bands. An optional clutch
+//!      input pauses classification (engine decoupled = ratio meaningless);
+//!      the W230 firmware has no usable clutch source and leaves it false.
 //!
 //! `Gear::Unknown` renders as a dash on the matrix.
 
@@ -381,7 +381,7 @@ mod tests {
     fn partial_calibration_classifies_only_learned_gears() {
         let mut e = GearEstimator::new();
         e.set_bands(BANDS, 2); // only 1st (240) and 2nd (165) learned
-        // Riding at 2nd-gear ratio: classified.
+                               // Riding at 2nd-gear ratio: classified.
         for _ in 0..3 {
             e.update(&riding(3300.0, 20.0)); // ratio 165
         }

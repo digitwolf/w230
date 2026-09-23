@@ -109,7 +109,10 @@ impl<'d> Kds<'d> {
                 info!("KDS: ECU acknowledged startCommunication (0xC1)");
             }
             Some(payload) => {
-                warn!("KDS: unexpected startCommunication reply: {}", hex(&payload));
+                warn!(
+                    "KDS: unexpected startCommunication reply: {}",
+                    hex(&payload)
+                );
                 return false;
             }
             None => {
@@ -160,7 +163,10 @@ impl<'d> Kds<'d> {
             Some(data) => Some(data.to_vec()),
             None => {
                 if !quiet {
-                    warn!("KDS: reg {reg:02X} negative/unknown reply: {}", hex(&payload));
+                    warn!(
+                        "KDS: reg {reg:02X} negative/unknown reply: {}",
+                        hex(&payload)
+                    );
                 }
                 None
             }
@@ -180,7 +186,10 @@ impl<'d> Kds<'d> {
             Some(data) => Some(data.to_vec()),
             None => {
                 if !quiet {
-                    warn!("KDS: common {id:04X} negative/unknown reply: {}", hex(&payload));
+                    warn!(
+                        "KDS: common {id:04X} negative/unknown reply: {}",
+                        hex(&payload)
+                    );
                 }
                 None
             }
@@ -237,8 +246,8 @@ impl<'d> Kds<'d> {
             Some(v) => Ok(Some(v)),
             None => {
                 warn!("KDS: undecoded interlock value {data:02X?}");
-                let raw = ((*data.first().unwrap_or(&0) as u16) << 8)
-                    | *data.get(1).unwrap_or(&0) as u16;
+                let raw =
+                    ((*data.first().unwrap_or(&0) as u16) << 8) | *data.get(1).unwrap_or(&0) as u16;
                 Err(raw)
             }
         }
@@ -268,7 +277,10 @@ impl<'d> Kds<'d> {
         let n = self.read_exact(&mut echo);
         info!("KDS RX << (echo) {}", hex(&echo[..n]));
         if n < frame.len() {
-            warn!("KDS: short echo ({n}/{} bytes) — check wiring/pull-up", frame.len());
+            warn!(
+                "KDS: short echo ({n}/{} bytes) — check wiring/pull-up",
+                frame.len()
+            );
         }
         self.last_activity = Some(Instant::now());
         Ok(())

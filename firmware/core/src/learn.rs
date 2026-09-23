@@ -190,7 +190,7 @@ impl RatioHistogram {
             }
         }
         // Strongest first; greedily accept peaks far enough from accepted ones.
-        peaks.sort_by(|a, b| b.1.cmp(&a.1));
+        peaks.sort_by_key(|p| std::cmp::Reverse(p.1));
         let mut accepted: Vec<(f32, u32)> = Vec::new();
         for (r, m) in peaks {
             if accepted
@@ -218,7 +218,10 @@ impl RatioHistogram {
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
             if err > ANCHOR_TOL {
-                info!("LEARN: peak ratio {r:.1} matches no gear (nearest err {:.0}%) — ignored", err * 100.0);
+                info!(
+                    "LEARN: peak ratio {r:.1} matches no gear (nearest err {:.0}%) — ignored",
+                    err * 100.0
+                );
                 continue;
             }
             if m > matched_mass[slot] {
@@ -227,7 +230,10 @@ impl RatioHistogram {
                 }
                 matched_mass[slot] = m;
                 bands[slot] = r;
-                info!("LEARN: gear {} refined to ratio {r:.1} (mass {m})", slot + 1);
+                info!(
+                    "LEARN: gear {} refined to ratio {r:.1} (mass {m})",
+                    slot + 1
+                );
             }
         }
         if learned < MIN_PEAKS {
@@ -262,7 +268,10 @@ mod tests {
             for _ in 0..per_gear {
                 let ratio = r + (rng.next() - 0.5) * 3.0;
                 let speed = 20.0 + rng.next() * 40.0;
-                assert_eq!(h.add_sample(ratio * speed, speed, false, false), SampleOutcome::Accepted);
+                assert_eq!(
+                    h.add_sample(ratio * speed, speed, false, false),
+                    SampleOutcome::Accepted
+                );
             }
         }
     }
@@ -283,7 +292,10 @@ mod tests {
     fn samples_land_in_the_right_bin() {
         let mut h = RatioHistogram::new();
         // ratio exactly 100.0 → bin index 80 (100 - RATIO_MIN)
-        assert_eq!(h.add_sample(4000.0, 40.0, false, false), SampleOutcome::Accepted);
+        assert_eq!(
+            h.add_sample(4000.0, 40.0, false, false),
+            SampleOutcome::Accepted
+        );
         assert_eq!(h.hist()[80], 1);
         assert_eq!(h.samples(), 1);
     }
@@ -357,7 +369,11 @@ mod tests {
         // The twin collapses to one gear: four gears refined.
         let (bands, count) = h.derive_bands(&REFERENCE).expect("twin should merge");
         assert_eq!(count, 4);
-        assert!((99.0..=105.0).contains(&bands[3]), "merged band {:.1}", bands[3]);
+        assert!(
+            (99.0..=105.0).contains(&bands[3]),
+            "merged band {:.1}",
+            bands[3]
+        );
     }
 
     #[test]
@@ -367,7 +383,12 @@ mod tests {
         // lose to the stronger true 4th-gear peak at 100.
         let mut rng = Lcg(0x1234_5678);
         for _ in 0..40 {
-            h.add_sample((100.0 + (rng.next() - 0.5) * 2.0) * 30.0, 30.0, false, false);
+            h.add_sample(
+                (100.0 + (rng.next() - 0.5) * 2.0) * 30.0,
+                30.0,
+                false,
+                false,
+            );
         }
         for _ in 0..16 {
             h.add_sample((93.0 + (rng.next() - 0.5) * 2.0) * 30.0, 30.0, false, false);
@@ -388,7 +409,10 @@ mod tests {
         let restored = RatioHistogram::from_blob(&h.to_blob()).unwrap();
         assert_eq!(restored.samples(), h.samples());
         assert_eq!(restored.hist(), h.hist());
-        assert_eq!(restored.derive_bands(&REFERENCE), h.derive_bands(&REFERENCE));
+        assert_eq!(
+            restored.derive_bands(&REFERENCE),
+            h.derive_bands(&REFERENCE)
+        );
     }
 
     #[test]
@@ -401,7 +425,10 @@ mod tests {
     fn bin_saturates_without_overflow() {
         let mut h = RatioHistogram::new();
         h.hist[80] = u16::MAX;
-        assert_eq!(h.add_sample(4000.0, 40.0, false, false), SampleOutcome::BinFull);
+        assert_eq!(
+            h.add_sample(4000.0, 40.0, false, false),
+            SampleOutcome::BinFull
+        );
         assert_eq!(h.hist()[80], u16::MAX);
     }
 

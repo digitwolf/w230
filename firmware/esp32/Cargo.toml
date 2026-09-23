@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["digitwolf"]
 edition = "2021"
 rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/digitwolf/w230"
+description = "Kawasaki W230 gear indicator firmware for the M5Stack ATOM Matrix (ESP32)"
 
 [[bin]]
 name = "w230-gear-indicator"
