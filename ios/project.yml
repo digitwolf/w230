@@ -38,5 +38,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.digitwolf.w230
         DEVELOPMENT_TEAM: L6WP9AN4NS
+        # iPhone only. Must be on the target: XcodeGen's iOS app preset sets
+        # "1,2" at target level, which would override the project setting and
+        # make App Store Connect demand iPad screenshots.
+        TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
