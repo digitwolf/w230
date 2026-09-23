@@ -62,9 +62,25 @@ platform :ios do
     File.delete(key_path) if key_path && File.exist?(key_path)
   end
 
+  # Register the bundle ID and create the App Store Connect app record on
+  # first run (idempotent afterwards).
+  private_lane :ensure_app_record do
+    produce(
+      api_key: api_key,
+      app_identifier: "com.digitwolf.w230",
+      app_name: "W230 Gear",
+      app_version: get_version_number(xcodeproj: PROJECT, target: SCHEME),
+      language: "en-US",
+      sku: "w230-gear",
+      enable_services: {},
+      skip_itc: false
+    )
+  end
+
   desc "Build and upload to TestFlight (internal testers see it immediately)"
   lane :beta do
     generate
+    ensure_app_record
     build = stamp_build
     archive
     upload_to_testflight(
@@ -77,6 +93,7 @@ platform :ios do
   desc "Build, upload, and create/refresh the App Store version (not submitted for review)"
   lane :release do |options|
     generate
+    ensure_app_record
     stamp_build
     archive
     upload_to_app_store(
