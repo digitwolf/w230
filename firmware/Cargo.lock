@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "w230-gear-indicator"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "embedded-svc",
