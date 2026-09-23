@@ -102,7 +102,12 @@ struct Worker {
     ota: EspOta,
     /// Project name from the running image's app descriptor; downloads must match.
     running_project: String,
-    wifi: BlockingWifi<EspWifi<'static>>,
+    /// The station driver costs ~40 KiB of heap, so it exists only from the
+    /// first request until the idle timeout; the modem is kept to recreate it.
+    modem: Option<WifiModem>,
+    sysloop: EspSystemEventLoop,
+    nvs: EspDefaultNvsPartition,
+    wifi: Option<BlockingWifi<EspWifi<'static>>>,
     wifi_up: bool,
     last_wifi_use: Instant,
     manifest: Option<Manifest>,
@@ -110,14 +115,23 @@ struct Worker {
 
 /// Spawn the worker. Also reads the running slot's rollback state so the
 /// main loop can decide whether a self-test is owed.
+///
+/// The version and manifest URL are read from the crate constants rather
+/// than passed in: with six-plus argument words the esp Xtensa toolchain was
+/// observed handing the callee uninitialised stack for the trailing `&str`
+/// (ptr/len = 0xA5A5A5A5), so this signature stays at four arguments.
 pub fn spawn(
     modem: WifiModem,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
     config: Arc<Mutex<ConfigStore>>,
-    default_manifest_url: &'static str,
-    current_version: &'static str,
 ) -> anyhow::Result<OtaHandle> {
+    let default_manifest_url: &'static str = crate::OTA_MANIFEST_URL;
+    let current_version: &'static str = crate::FW_VERSION;
+    info!(
+        "OTA: worker starting (fw {current_version}, manifest {default_manifest_url}), {} KiB heap free",
+        unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+    );
     let (tx, rx) = sync_channel(4);
     let shared = Arc::new(Mutex::new(OtaShared::default()));
 
@@ -152,10 +166,6 @@ pub fn spawn(
         sh.changed = true;
     }
 
-    // The station driver is created once (it owns the modem) and started
-    // only when a request needs it.
-    let wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs))?, sysloop)?;
-
     let running_project = running_app_project();
     info!("OTA: running image descriptor project '{running_project}'");
 
@@ -167,7 +177,10 @@ pub fn spawn(
         current_version,
         ota,
         running_project,
-        wifi,
+        modem: Some(modem),
+        sysloop,
+        nvs,
+        wifi: None,
         wifi_up: false,
         last_wifi_use: Instant::now(),
         manifest: None,
@@ -212,7 +225,7 @@ impl Worker {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if self.wifi_up && self.last_wifi_use.elapsed() > WIFI_IDLE_TIMEOUT {
+                    if self.wifi.is_some() && self.last_wifi_use.elapsed() > WIFI_IDLE_TIMEOUT {
                         self.wifi_disconnect();
                     }
                 }
@@ -251,10 +264,43 @@ impl Worker {
             .unwrap_or_else(|| self.default_manifest_url.to_string())
     }
 
+    /// Create the station driver on first use.
+    fn wifi_driver(&mut self) -> anyhow::Result<&mut BlockingWifi<EspWifi<'static>>> {
+        if self.wifi.is_none() {
+            let modem = self
+                .modem
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("wifi modem unavailable"))?;
+            let before = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+            let driver = match EspWifi::new(modem, self.sysloop.clone(), Some(self.nvs.clone())) {
+                Ok(d) => d,
+                Err(e) => {
+                    // EspWifi::new consumed the modem token even on failure; the
+                    // hardware is untouched, so a fresh token is safe here.
+                    self.modem = Some(unsafe { WifiModem::new() });
+                    return Err(e.into());
+                }
+            };
+            self.wifi = Some(BlockingWifi::wrap(driver, self.sysloop.clone())?);
+            info!(
+                "WIFI: driver created ({} KiB heap free, was {} KiB)",
+                unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024,
+                before / 1024
+            );
+        }
+        Ok(self.wifi.as_mut().unwrap())
+    }
+
     /// Connect the station with the stored credentials. Idempotent.
     fn wifi_connect(&mut self) -> bool {
         self.last_wifi_use = Instant::now();
-        if self.wifi_up && self.wifi.is_connected().unwrap_or(false) {
+        if self.wifi_up
+            && self
+                .wifi
+                .as_ref()
+                .map(|w| w.is_connected().unwrap_or(false))
+                .unwrap_or(false)
+        {
             return true;
         }
         let (ssid, psk) = {
@@ -277,7 +323,17 @@ impl Worker {
             w.rssi = None;
             w.error = None;
         });
+        let mut wifi_driver_result = None;
+        if self.wifi.is_none() {
+            wifi_driver_result = Some(self.wifi_driver().map(|_| ()));
+        }
+        let wifi_up = &mut self.wifi_up;
+        let wifi_slot = &mut self.wifi;
         let result = (|| -> anyhow::Result<(String, i32)> {
+            if let Some(Err(e)) = wifi_driver_result {
+                return Err(e);
+            }
+            let wifi = wifi_slot.as_mut().unwrap();
             let conf = Configuration::Client(ClientConfiguration {
                 ssid: ssid
                     .as_str()
@@ -294,15 +350,15 @@ impl Worker {
                 },
                 ..Default::default()
             });
-            self.wifi.set_configuration(&conf)?;
-            if !self.wifi_up {
-                self.wifi.start()?;
-                self.wifi_up = true;
+            wifi.set_configuration(&conf)?;
+            if !*wifi_up {
+                wifi.start()?;
+                *wifi_up = true;
             }
-            self.wifi.connect()?;
-            self.wifi.wait_netif_up()?;
-            let ip = self.wifi.wifi().sta_netif().get_ip_info()?.ip.to_string();
-            let rssi = self.wifi.wifi().get_rssi().unwrap_or(0);
+            wifi.connect()?;
+            wifi.wait_netif_up()?;
+            let ip = wifi.wifi().sta_netif().get_ip_info()?.ip.to_string();
+            let rssi = wifi.wifi().get_rssi().unwrap_or(0);
             Ok((ip, rssi))
         })();
         match result {
@@ -321,19 +377,29 @@ impl Worker {
                     w.state = WifiState::Failed;
                     w.error = Some(format!("{e}"));
                 });
-                let _ = self.wifi.disconnect();
+                if let Some(w) = self.wifi.as_mut() {
+                    let _ = w.disconnect();
+                }
                 false
             }
         }
     }
 
+    /// Stop the station and free its driver (and heap) until next use.
     fn wifi_disconnect(&mut self) {
-        if self.wifi_up {
-            let _ = self.wifi.disconnect();
-            let _ = self.wifi.stop();
-            self.wifi_up = false;
-            info!("WIFI: powered down");
+        if let Some(mut w) = self.wifi.take() {
+            if self.wifi_up {
+                let _ = w.disconnect();
+                let _ = w.stop();
+            }
+            drop(w);
+            self.modem = Some(unsafe { WifiModem::new() });
+            info!(
+                "WIFI: driver released ({} KiB heap free)",
+                unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+            );
         }
+        self.wifi_up = false;
         self.set_wifi(|w| {
             w.state = WifiState::Off;
             w.ip = None;
@@ -589,17 +655,17 @@ impl Worker {
     }
 }
 
-/// Project name stamped into the running image (`esp_app_desc_t`).
+/// Project name stamped into the running image (`esp_app_desc_t`). Read as
+/// a bounded byte array, never as a C string: the field is 32 bytes and a
+/// full-width name would have no terminator.
 fn running_app_project() -> String {
-    unsafe {
-        let d = esp_idf_svc::sys::esp_app_get_description();
-        if d.is_null() {
-            return String::new();
-        }
-        std::ffi::CStr::from_ptr((*d).project_name.as_ptr())
-            .to_string_lossy()
-            .into_owned()
+    let d = unsafe { esp_idf_svc::sys::esp_app_get_description() };
+    if d.is_null() {
+        return String::new();
     }
+    let raw: [u8; 32] = unsafe { core::mem::transmute((*d).project_name) };
+    let len = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..len]).into_owned()
 }
 
 /// The 256-byte `esp_app_desc_t` at the head of every ESP-IDF image carries

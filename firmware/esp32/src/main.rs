@@ -50,13 +50,13 @@ use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
 /// Firmware version, from esp32/Cargo.toml (build.rs keeps sdkconfig's
 /// CONFIG_APP_PROJECT_VER identical so the image descriptor agrees).
-const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HARDWARE: &str = "atom-matrix";
 /// Where releases live. `scripts/release.sh` publishes here; the app can
 /// point a device at a staging manifest instead (Settings → manifest URL).
-const OTA_MANIFEST_URL: &str = match option_env!("W230_OTA_MANIFEST_URL") {
+pub const OTA_MANIFEST_URL: &str = match option_env!("W230_OTA_MANIFEST_URL") {
     Some(u) => u,
-    None => "https://d2ilb6j4crje4c.cloudfront.net/w230/manifest.json",
+    None => "https://d394jgrm9p9yqj.cloudfront.net/w230/manifest.json",
 };
 /// Boot-time update behaviour when nothing is stored yet: check only, never
 /// install unattended (a reboot at key-on is not what a rider expects).
@@ -242,14 +242,7 @@ fn main() -> anyhow::Result<()> {
         info!("WIFI_DIAG on: softAP dashboard replaces OTA for this build");
         (Some(web::start(wifi_modem, sysloop, nvs_part)?), None)
     } else {
-        let ota = match ota::spawn(
-            wifi_modem,
-            sysloop,
-            nvs_part,
-            config.clone(),
-            OTA_MANIFEST_URL,
-            FW_VERSION,
-        ) {
+        let ota = match ota::spawn(wifi_modem, sysloop, nvs_part, config.clone()) {
             Ok(h) => Some(h),
             Err(e) => {
                 warn!("OTA: worker start failed: {e} — updates unavailable this boot");
@@ -267,9 +260,10 @@ fn main() -> anyhow::Result<()> {
         )
     });
     info!(
-        "W230 firmware {FW_VERSION} (BLE proto {}), slot {:?}",
+        "W230 firmware {FW_VERSION} (BLE proto {}), slot {:?}, {} KiB heap free after init",
         proto::PROTOCOL_VERSION,
-        boot_slot_info
+        boot_slot_info,
+        unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
     );
 
     let mut estimator = GearEstimator::new();

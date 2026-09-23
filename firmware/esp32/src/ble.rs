@@ -23,7 +23,6 @@ use enumset::{enum_set, EnumSet};
 use esp_idf_hal::modem::BluetoothModem;
 use esp_idf_svc::bt::ble::gap::{
     AdvConfiguration, AuthenticationRequest, BleGapEvent, EspBleGap, IOCapabilities, KeyMask,
-    SecurityConfiguration,
 };
 use esp_idf_svc::bt::ble::gatt::server::{ConnectionId, EspGatts, GattsEvent};
 use esp_idf_svc::bt::ble::gatt::{
@@ -231,9 +230,15 @@ impl Ble {
     /// Bring up the Bluedroid stack and register the service. Advertising
     /// starts as soon as the stack reports the service built.
     pub fn start(modem: BluetoothModem, nvs: EspDefaultNvsPartition) -> anyhow::Result<Ble> {
-        let driver = Arc::new(BtDriver::<BleMode>::new(modem, Some(nvs))?);
-        let gap: Gap = Arc::new(EspBleGap::new(driver.clone())?);
-        let gatts: Gatts = Arc::new(EspGatts::new(driver.clone())?);
+        let step = |name: &'static str| move |e: EspError| anyhow::anyhow!("{name}: {e}");
+        let driver =
+            Arc::new(BtDriver::<BleMode>::new(modem, Some(nvs)).map_err(step("bt driver"))?);
+        info!(
+            "BLE: controller + host up ({} KiB heap free)",
+            unsafe { esp_idf_svc::sys::esp_get_free_heap_size() } / 1024
+        );
+        let gap: Gap = Arc::new(EspBleGap::new(driver.clone()).map_err(step("gap"))?);
+        let gatts: Gatts = Arc::new(EspGatts::new(driver.clone()).map_err(step("gatts"))?);
         let (cmd_tx, commands) = sync_channel(8);
         let (wifi_tx, wifi_credentials) = sync_channel(2);
         let inner = Arc::new(Inner {
@@ -247,46 +252,67 @@ impl Ble {
 
         // Just-Works bonding with encryption: enough to keep casual writers
         // out of the command/WiFi characteristics, no passkey UI needed.
-        inner.gap.set_security_conf(&SecurityConfiguration {
-            auth_req_mode: AuthenticationRequest::SecureBonding,
-            io_capabilities: IOCapabilities::NoInputNoOutput,
-            initiator_key: Some(KeyMask::EncryptionKey | KeyMask::IdentityResolvingKey),
-            responder_key: Some(KeyMask::EncryptionKey | KeyMask::IdentityResolvingKey),
-            max_key_size: Some(16),
-            min_key_size: None,
-            static_passkey: None,
-            only_accept_specified_auth: false,
-            enable_oob: false,
-        })?;
-        // esp-idf-svc 0.51 skips the auth-req parameter in set_security_conf;
-        // without it the stack pairs without bonding and re-pairs every time.
+        // Set directly: esp-idf-svc 0.51's set_security_conf passes a wrong
+        // size for one parameter (ESP_ERR_INVALID_ARG) and skips auth-req.
         {
-            let auth_req: u8 = AuthenticationRequest::SecureBonding as u8;
-            esp_idf_svc::sys::esp!(unsafe {
-                esp_idf_svc::sys::esp_ble_gap_set_security_param(
-                    esp_idf_svc::sys::esp_ble_sm_param_t_ESP_BLE_SM_AUTHEN_REQ_MODE,
-                    &auth_req as *const u8 as *mut core::ffi::c_void,
-                    1,
-                )
-            })?;
+            use esp_idf_svc::sys::*;
+            let set =
+                |param: esp_ble_sm_param_t, v: u8, name: &'static str| -> anyhow::Result<()> {
+                    esp!(unsafe {
+                        esp_ble_gap_set_security_param(
+                            param,
+                            &v as *const u8 as *mut core::ffi::c_void,
+                            1,
+                        )
+                    })
+                    .map_err(step(name))
+                };
+            set(
+                esp_ble_sm_param_t_ESP_BLE_SM_AUTHEN_REQ_MODE,
+                AuthenticationRequest::SecureBonding as u8,
+                "auth req",
+            )?;
+            set(
+                esp_ble_sm_param_t_ESP_BLE_SM_IOCAP_MODE,
+                IOCapabilities::NoInputNoOutput as u8,
+                "io cap",
+            )?;
+            let keys = (KeyMask::EncryptionKey | KeyMask::IdentityResolvingKey) as u8;
+            set(esp_ble_sm_param_t_ESP_BLE_SM_SET_INIT_KEY, keys, "init key")?;
+            set(esp_ble_sm_param_t_ESP_BLE_SM_SET_RSP_KEY, keys, "rsp key")?;
+            set(
+                esp_ble_sm_param_t_ESP_BLE_SM_MAX_KEY_SIZE,
+                16,
+                "max key size",
+            )?;
         }
         // Long attribute values (JSON up to 512 B) in as few ATT round trips
         // as the phone allows; iOS negotiates 185.
-        esp_idf_svc::sys::esp!(unsafe { esp_idf_svc::sys::esp_ble_gatt_set_local_mtu(500) })?;
+        esp_idf_svc::sys::esp!(unsafe { esp_idf_svc::sys::esp_ble_gatt_set_local_mtu(500) })
+            .map_err(step("local mtu"))?;
 
         let gap_inner = inner.clone();
-        inner.gap.subscribe(move |event| {
-            if let Err(e) = gap_inner.on_gap_event(event) {
-                warn!("BLE gap: {e:?}");
-            }
-        })?;
+        inner
+            .gap
+            .subscribe(move |event| {
+                if let Err(e) = gap_inner.on_gap_event(event) {
+                    warn!("BLE gap: {e:?}");
+                }
+            })
+            .map_err(step("gap subscribe"))?;
         let gatts_inner = inner.clone();
-        inner.gatts.subscribe(move |(gatt_if, event)| {
-            if let Err(e) = gatts_inner.on_gatts_event(gatt_if, event) {
-                warn!("BLE gatts: {e:?}");
-            }
-        })?;
-        inner.gatts.register_app(APP_ID)?;
+        inner
+            .gatts
+            .subscribe(move |(gatt_if, event)| {
+                if let Err(e) = gatts_inner.on_gatts_event(gatt_if, event) {
+                    warn!("BLE gatts: {e:?}");
+                }
+            })
+            .map_err(step("gatts subscribe"))?;
+        inner
+            .gatts
+            .register_app(APP_ID)
+            .map_err(step("register app"))?;
         info!("BLE: stack up, registering service");
 
         Ok(Ble {

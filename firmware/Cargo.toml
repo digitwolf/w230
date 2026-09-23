@@ -8,6 +8,9 @@ default-members = ["esp32"]
 
 [profile.release]
 opt-level = "s"
+# Line tables only: lets `xtensa-esp32-elf-addr2line` resolve panic
+# backtraces to source lines; DWARF stays in the ELF, not in flash.
+debug = "line-tables-only"
 
 [profile.dev]
 debug = true

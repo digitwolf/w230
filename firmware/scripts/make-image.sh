@@ -12,7 +12,7 @@ out="${1:-$here/dist}"
 elf="$here/target/xtensa-esp32-espidf/release/w230-gear-indicator"
 [[ -f "$elf" ]] || { echo "make-image.sh: build first (cargo build --release)" >&2; exit 1; }
 ver="$(grep -m1 '^version' "$here/esp32/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
-base_url="${OTA_BASE_URL:-https://REPLACE-WITH-YOUR-CLOUDFRONT-DOMAIN/w230}"
+base_url="${OTA_BASE_URL:-https://d394jgrm9p9yqj.cloudfront.net/w230}"
 min_version="${OTA_MIN_VERSION:-0.2.0}"
 notes="${OTA_NOTES:-}"
 mkdir -p "$out"
