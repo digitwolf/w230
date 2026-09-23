@@ -1,1 +1,1 @@
-Live gear, diagnostics, calibration and over-the-air firmware updates for the W230 gear indicator.
+Build the open-source gear indicator for your Kawasaki W230, then let the app show what it sees, calibrate it and keep its firmware current over WiFi.

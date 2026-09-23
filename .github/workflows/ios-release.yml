@@ -11,7 +11,7 @@ on:
       lane:
         description: fastlane lane
         type: choice
-        options: [beta, release]
+        options: [beta, release, metadata]
         default: beta
       submit:
         description: submit the App Store version for review (release lane only)
@@ -47,8 +47,8 @@ jobs:
       - name: fastlane
         run: |
           lane="${{ github.event.inputs.lane || 'beta' }}"
-          if [ "$lane" = "release" ]; then
-            bundle exec fastlane ios release submit:${{ github.event.inputs.submit || 'false' }}
-          else
-            bundle exec fastlane ios beta
-          fi
+          case "$lane" in
+            release)  bundle exec fastlane ios release submit:${{ github.event.inputs.submit || 'false' }} ;;
+            metadata) bundle exec fastlane ios metadata ;;
+            *)        bundle exec fastlane ios beta ;;
+          esac

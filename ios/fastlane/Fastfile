@@ -84,6 +84,23 @@ platform :ios do
     )
   end
 
+  desc "Push metadata + screenshots to the App Store version without a new binary"
+  lane :metadata do
+    generate
+    upload_to_app_store(
+      api_key: api_key,
+      app_version: get_version_number(xcodeproj: PROJECT, target: SCHEME),
+      metadata_path: "#{FASTLANE_DIR}/metadata",
+      screenshots_path: "#{FASTLANE_DIR}/screenshots",
+      skip_screenshots: !Dir.exist?("#{FASTLANE_DIR}/screenshots/en-US"),
+      overwrite_screenshots: true,
+      skip_binary_upload: true,
+      force: true,
+      run_precheck_before_submit: false,
+      submit_for_review: false
+    )
+  end
+
   desc "Build, upload, and create/refresh the App Store version (not submitted for review)"
   lane :release do |options|
     generate

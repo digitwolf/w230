@@ -1,1 +1,1 @@
-First release: live dashboard, diagnostics and black box, calibration histogram, troubleshooting checks, WiFi setup and over-the-air firmware updates.
+First release. Live gear and readings, diagnostics and ride black box, calibration histogram, guided troubleshooting with export, WiFi setup and over-the-air firmware updates with rollback, and a demo mode for exploring the app before building the indicator.
