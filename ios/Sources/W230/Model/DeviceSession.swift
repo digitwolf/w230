@@ -49,7 +49,7 @@ final class DeviceSession {
 
     init() {
         ble.onStateChange = { [weak self] s in
-            guard let self else { return }
+            guard let self, !self.isDemo else { return }
             self.bleState = s
             if s == .disconnected || s == .connecting {
                 self.live = nil
@@ -57,7 +57,7 @@ final class DeviceSession {
         }
         ble.onDiscovered = { [weak self] list in self?.discovered = list }
         ble.onReady = { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isDemo else { return }
             self.connectedName = self.ble.peripheral?.name ?? W230Protocol.deviceName
             self.connectedID = self.ble.peripheral?.identifier
             if let id = self.connectedID {
@@ -78,7 +78,7 @@ final class DeviceSession {
             }
         }
         ble.onNotification = { [weak self] uuid, data in
-            guard let self else { return }
+            guard let self, !self.isDemo else { return }
             if uuid == W230Protocol.live {
                 if let l = LiveStatus(data: data) {
                     self.live = l
