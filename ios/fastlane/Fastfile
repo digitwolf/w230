@@ -62,23 +62,15 @@ platform :ios do
     File.delete(key_path) if key_path && File.exist?(key_path)
   end
 
-  # Register the bundle ID and create the App Store Connect app record on
-  # first run (idempotent afterwards).
-  private_lane :ensure_app_record do
-    api_key # produce reads the key from the lane context, not a parameter
-    produce(
-      app_identifier: "com.digitwolf.w230",
-      app_name: "W230 Gear",
-      language: "en-US",
-      sku: "w230-gear",
-      skip_itc: false
-    )
-  end
+  # The App Store Connect app record ("W230 Gear", bundle ID
+  # com.digitwolf.w230, SKU w230-gear) must exist before the first upload;
+  # Apple's API cannot create app records, so it is a one-time step in the
+  # App Store Connect web UI. The bundle ID itself is registered by Xcode
+  # cloud signing during the archive.
 
   desc "Build and upload to TestFlight (internal testers see it immediately)"
   lane :beta do
     generate
-    ensure_app_record
     build = stamp_build
     archive
     upload_to_testflight(
@@ -91,7 +83,6 @@ platform :ios do
   desc "Build, upload, and create/refresh the App Store version (not submitted for review)"
   lane :release do |options|
     generate
-    ensure_app_record
     stamp_build
     archive
     upload_to_app_store(
