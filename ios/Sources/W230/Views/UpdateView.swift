@@ -1,14 +1,20 @@
 import SwiftUI
 
+/// Local UI state for `UpdateView` (`@State` is unavailable in this toolchain).
+@MainActor
+final class UpdateFormState: ObservableObject {
+    @Published var ssid = ""
+    @Published var password = ""
+    @Published var showWifiForm = false
+    @Published var confirmInstall = false
+    @Published var manifestUrl = ""
+    @Published var showAdvanced = false
+}
+
 /// Firmware updates: WiFi provisioning, check/install, boot policy.
 struct UpdateView: View {
     @Environment(DeviceSession.self) private var session
-    @State private var ssid = ""
-    @State private var password = ""
-    @State private var showWifiForm = false
-    @State private var confirmInstall = false
-    @State private var manifestUrl = ""
-    @State private var showAdvanced = false
+    @StateObject private var form = UpdateFormState()
 
     var body: some View {
         Group {
@@ -27,7 +33,7 @@ struct UpdateView: View {
         }
         .navigationTitle("Update")
         .toolbar { ConnectionToolbar() }
-        .onChange(of: session.settings?.manifestUrl) { _, new in manifestUrl = new ?? "" }
+        .onChange(of: session.settings?.manifestUrl) { _, new in form.manifestUrl = new ?? "" }
     }
 
     private var ota: OtaStatus { session.otaStatus }
@@ -70,12 +76,12 @@ struct UpdateView: View {
             .disabled(ota.state.isBusy || !wifiReady || session.deviceInfo?.otaCapable == false)
             if ota.state == .available, let v = ota.available {
                 Button {
-                    confirmInstall = true
+                    form.confirmInstall = true
                 } label: {
                     Label("Install \(v)", systemImage: "arrow.down.circle.fill")
                 }
                 .disabled(ota.state.isBusy || (session.live?.speed ?? 0) > 0)
-                .confirmationDialog("Install firmware \(v)? The indicator downloads over WiFi, shows a blue fill, then reboots. Keep the ignition on and the bike stationary (about a minute).", isPresented: $confirmInstall, titleVisibility: .visible) {
+                .confirmationDialog("Install firmware \(v)? The indicator downloads over WiFi, shows a blue fill, then reboots. Keep the ignition on and the bike stationary (about a minute).", isPresented: $form.confirmInstall, titleVisibility: .visible) {
                     Button("Install") { Task { await session.installUpdate() } }
                 }
             }
@@ -94,17 +100,17 @@ struct UpdateView: View {
             if let ip = w.ip { KeyValueRow(key: "IP", value: ip, mono: true) }
             if let rssi = w.rssi { KeyValueRow(key: "Signal", value: "\(rssi) dBm") }
             if let e = w.error { Text(e).font(.footnote).foregroundStyle(.red) }
-            Button { showWifiForm.toggle() } label: { Label(wifiReady ? "Change WiFi network" : "Add WiFi network", systemImage: "wifi") }
-            if showWifiForm {
-                TextField("SSID (2.4 GHz)", text: $ssid).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField("Password (blank for open networks)", text: $password)
+            Button { form.showWifiForm.toggle() } label: { Label(wifiReady ? "Change WiFi network" : "Add WiFi network", systemImage: "wifi") }
+            if form.showWifiForm {
+                TextField("SSID (2.4 GHz)", text: $form.ssid).textInputAutocapitalization(.never).autocorrectionDisabled()
+                SecureField("Password (blank for open networks)", text: $form.password)
                 Button("Send to indicator") {
                     Task {
-                        if await session.sendWifi(WifiCredentials(ssid: ssid, password: password)) {
-                            showWifiForm = false; password = ""
+                        if await session.sendWifi(WifiCredentials(ssid: form.ssid, password: form.password)) {
+                            form.showWifiForm = false; form.password = ""
                         }
                     }
-                }.disabled(ssid.isEmpty)
+                }.disabled(form.ssid.isEmpty)
             }
             if wifiReady {
                 Button { Task { await session.testWifi() } } label: { Label("Test connection", systemImage: "network") }
@@ -132,11 +138,11 @@ struct UpdateView: View {
 
     @ViewBuilder private var advancedSection: some View {
         Section {
-            DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-                TextField("Manifest URL (https)", text: $manifestUrl).font(.footnote.monospaced()).textInputAutocapitalization(.never).autocorrectionDisabled()
+            DisclosureGroup("Advanced", isExpanded: $form.showAdvanced) {
+                TextField("Manifest URL (https)", text: $form.manifestUrl).font(.footnote.monospaced()).textInputAutocapitalization(.never).autocorrectionDisabled()
                 HStack {
-                    Button("Use this URL") { Task { await session.setManifestUrl(manifestUrl) } }
-                        .disabled(!manifestUrl.hasPrefix("https://"))
+                    Button("Use this URL") { Task { await session.setManifestUrl(form.manifestUrl) } }
+                        .disabled(!form.manifestUrl.hasPrefix("https://"))
                     Spacer()
                     Button("Reset to default") { Task { await session.setManifestUrl("") } }
                         .disabled(session.settings?.manifestDefault ?? true)
@@ -149,7 +155,7 @@ struct UpdateView: View {
         } footer: {
             Text("The manifest lists the newest release, its download URL, size and SHA-256. The indicator verifies TLS, the image header, the byte count and the hash before switching boot slots, and rolls back automatically if the new image fails its self-test.")
         }
-        .onAppear { manifestUrl = session.settings?.manifestUrl ?? "" }
+        .onAppear { form.manifestUrl = session.settings?.manifestUrl ?? "" }
     }
 
     private func wifiStateText(_ w: WifiStatus) -> String {

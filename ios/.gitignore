@@ -1,0 +1,6 @@
+/.build
+/xtool
+/.swiftpm
+/.sourcekit-lsp
+/W230.xcodeproj
+.DS_Store

@@ -3,6 +3,7 @@ import Foundation
 /// A single JSON document with everything the app knows about the device —
 /// for sharing from the troubleshooting screen (mail, Files, AirDrop).
 enum DiagnosticExport {
+    @MainActor
     static func make(_ s: DeviceSession) -> String {
         struct Payload: Encodable {
             var exportedAt: String

@@ -2,9 +2,14 @@ import SwiftUI
 
 /// Firmware identity, platform health, the persisted ride black box, and
 /// the firmware's own recent event log.
+@MainActor
+final class DiagnosticsUIState: ObservableObject {
+    @Published var confirmClear = false
+}
+
 struct DiagnosticsView: View {
     @Environment(DeviceSession.self) private var session
-    @State private var confirmClear = false
+    @StateObject private var ui = DiagnosticsUIState()
 
     var body: some View {
         Group {
@@ -82,8 +87,8 @@ struct DiagnosticsView: View {
                     KeyValueRow(key: "Rejected: bin full", value: "\(b.gates.binFull)")
                     KeyValueRow(key: "Rejected: clutch", value: "\(b.gates.clutch)")
                 }
-                Button("Clear black box", role: .destructive) { confirmClear = true }
-                    .confirmationDialog("Clear the ride black box? Learned calibration is kept.", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear black box", role: .destructive) { ui.confirmClear = true }
+                    .confirmationDialog("Clear the ride black box? Learned calibration is kept.", isPresented: $ui.confirmClear, titleVisibility: .visible) {
                         Button("Clear", role: .destructive) { Task { await session.clearBlackBox() } }
                     }
             } else {

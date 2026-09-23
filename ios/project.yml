@@ -19,9 +19,9 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: W230
+      - path: Sources/W230
     info:
-      path: W230/Info.plist
+      path: Info.plist
       properties:
         CFBundleDisplayName: W230 Gear
         UILaunchScreen: {}

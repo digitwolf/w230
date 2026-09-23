@@ -13,7 +13,37 @@ CSV export, wipe), **Troubleshoot** (automatic checks derived from the
 data, display legend, JSON export), **Update** (WiFi network, check /
 install, boot-time policy, manifest channel, reboot).
 
-## Build
+## Build and install from Linux (xtool, no Mac)
+
+This directory is an xtool SwiftPM package (`Package.swift` with one
+library product, `xtool.yml`, `Info.plist`). With xtool, Swift 6.4 and the
+iOS SDK set up as in `~/digitwolf/ios` (see the shared Claude agent
+`~/.claude/agents/ios-xtool.md` for the full environment notes):
+
+```sh
+cd ios
+scripts/deploy.sh build     # cross-compile only
+scripts/deploy.sh           # build, sign, install and launch on the USB iPhone
+```
+
+`scripts/deploy.sh` wraps `xtool dev` and puts `scripts/shims/swift` first
+on PATH (forces SwiftPM's native build system, which the iOS platform
+needs). Constraints that come with building against the iOS 27 SDK on
+Linux:
+
+- **No `@State`.** It is a macro backed by a macOS-only compiler plugin.
+  Local view state lives in small `ObservableObject` classes held with
+  `@StateObject` (see `UpdateFormState` in `Views/UpdateView.swift`).
+  `@Observable`, `@Environment`, `@Binding`, `@AppStorage` are fine.
+- Main-actor isolation is enforced: helpers that read `DeviceSession` are
+  `@MainActor`.
+- On a free Apple team the app installs as
+  `XTL-L6WP9AN4NS.com.digitwolf.w230` and its profile expires after 7
+  days; re-run `scripts/deploy.sh` to renew. First install on a phone:
+  trust the developer under Settings → General → VPN & Device Management
+  and enable Developer Mode under Privacy & Security.
+
+## Build with Xcode (macOS)
 
 ```sh
 brew install xcodegen
@@ -43,10 +73,13 @@ the wire format is documented in `docs/ble-protocol.md`.
 ## Layout
 
 ```
-W230/App        W230App.swift                   entry point
-W230/BLE        BLECentral.swift                CoreBluetooth wrapper (scan, connect, async read/write)
-W230/Protocol   W230Protocol.swift              wire formats; FirmwareCompatibility.swift version rules
-W230/Model      DeviceSession.swift             @Observable state + actions used by every screen
-W230/Views      one file per screen
-W230/Support    Export.swift                    diagnostic bundle / CSV for the share sheet
+Package.swift, xtool.yml, Info.plist   xtool SwiftPM package (Linux build)
+project.yml                            XcodeGen spec (Mac build, CI)
+scripts/deploy.sh, scripts/shims/      Linux build/sign/install wrapper
+Sources/W230/App        W230App.swift             entry point (one DeviceSession for the app's life)
+Sources/W230/BLE        BLECentral.swift          CoreBluetooth wrapper (scan, connect, async read/write)
+Sources/W230/Protocol   W230Protocol.swift        wire formats; FirmwareCompatibility.swift version rules
+Sources/W230/Model      DeviceSession.swift       @Observable state + actions used by every screen
+Sources/W230/Views      one file per screen
+Sources/W230/Support    Export.swift              diagnostic bundle / CSV for the share sheet
 ```

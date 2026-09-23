@@ -1,0 +1,11 @@
+#!/bin/sh
+# Shim used by scripts/deploy.sh only.
+# Swift 6.4's SwiftPM defaults to the `swiftbuild` backend, which fails on Linux
+# with "unable to find platform for 'iphoneos'". Force the native backend for
+# `swift build`; pass every other subcommand through untouched.
+REAL="$HOME/.local/share/swiftly/bin/swift"
+if [ "$1" = "build" ]; then
+    shift
+    exec "$REAL" build --build-system native "$@"
+fi
+exec "$REAL" "$@"

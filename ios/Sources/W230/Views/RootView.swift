@@ -36,20 +36,25 @@ struct ConnectionToolbar: ToolbarContent {
     }
 }
 
+@MainActor
+final class ConnectionStatusState: ObservableObject {
+    @Published var showScan = false
+}
+
 struct ConnectionStatusButton: View {
     @Environment(DeviceSession.self) private var session
-    @State private var showScan = false
+    @StateObject private var ui = ConnectionStatusState()
 
     var body: some View {
         Button {
-            showScan = true
+            ui.showScan = true
         } label: {
             HStack(spacing: 6) {
                 Circle().fill(color).frame(width: 9, height: 9)
                 Text(label).font(.footnote)
             }
         }
-        .sheet(isPresented: $showScan) { ScanView() }
+        .sheet(isPresented: $ui.showScan) { ScanView() }
     }
 
     private var color: Color {

@@ -2,10 +2,15 @@ import SwiftUI
 import Charts
 
 /// What the gear classifier is using and the evidence behind it.
+@MainActor
+final class CalibrationUIState: ObservableObject {
+    @Published var confirmWipe = false
+    @Published var logScale = false
+}
+
 struct CalibrationView: View {
     @Environment(DeviceSession.self) private var session
-    @State private var confirmWipe = false
-    @State private var logScale = false
+    @StateObject private var ui = CalibrationUIState()
 
     var body: some View {
         Group {
@@ -68,7 +73,7 @@ struct CalibrationView: View {
                         RuleMark(x: .value("factory", b)).foregroundStyle(.gray.opacity(0.35)).lineStyle(StrokeStyle(dash: [3, 3]))
                     }
                     ForEach(rows, id: \.ratio) { r in
-                        BarMark(x: .value("ratio", r.ratio), y: .value("count", logScale ? log10(Double(r.count) + 1) : Double(r.count)), width: 2)
+                        BarMark(x: .value("ratio", r.ratio), y: .value("count", ui.logScale ? log10(Double(r.count) + 1) : Double(r.count)), width: 2)
                             .foregroundStyle(.cyan)
                     }
                     ForEach(session.calibration?.bands ?? [], id: \.self) { b in
@@ -78,7 +83,7 @@ struct CalibrationView: View {
                 .chartXScale(domain: 30.0...260.0)
                 .chartXAxisLabel("rpm / km/h")
                 .frame(height: 200)
-                Toggle("Log scale", isOn: $logScale)
+                Toggle("Log scale", isOn: $ui.logScale)
                 HStack(spacing: 14) {
                     Label("samples", systemImage: "square.fill").foregroundStyle(.cyan)
                     Label("learned band", systemImage: "line.diagonal").foregroundStyle(.orange)
@@ -116,8 +121,8 @@ struct CalibrationView: View {
             ShareLink(item: DiagnosticExport.histogramCSV(session.histogram), preview: SharePreview("histogram.csv")) {
                 Label("Export histogram CSV", systemImage: "square.and.arrow.up")
             }
-            Button("Wipe learned calibration", role: .destructive) { confirmWipe = true }
-                .confirmationDialog("Wipe the learned calibration and the black box? The indicator falls back to factory bands and relearns as you ride.", isPresented: $confirmWipe, titleVisibility: .visible) {
+            Button("Wipe learned calibration", role: .destructive) { ui.confirmWipe = true }
+                .confirmationDialog("Wipe the learned calibration and the black box? The indicator falls back to factory bands and relearns as you ride.", isPresented: $ui.confirmWipe, titleVisibility: .visible) {
                     Button("Wipe", role: .destructive) { Task { await session.wipeCalibration() } }
                 }
         }
