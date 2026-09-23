@@ -12,6 +12,9 @@ default_platform(:ios)
 
 SCHEME = "W230"
 PROJECT = "W230.xcodeproj"
+# Lanes execute inside this directory; use absolute paths for everything
+# under it so deliver finds metadata and screenshots wherever it is invoked.
+FASTLANE_DIR = File.expand_path(__dir__)
 
 platform :ios do
   before_all do
@@ -87,9 +90,9 @@ platform :ios do
     stamp_build
     archive
     begin
+      api_key # the action reads the key from the lane context
       upload_app_privacy_details_to_app_store(
-        api_key: api_key,
-        json_path: "./fastlane/app_privacy_details.json",
+        json_path: "#{FASTLANE_DIR}/app_privacy_details.json",
         skip_publish: false
       )
     rescue => e
@@ -98,10 +101,11 @@ platform :ios do
     upload_to_app_store(
       api_key: api_key,
       app_version: get_version_number(xcodeproj: PROJECT, target: SCHEME),
-      metadata_path: "./fastlane/metadata",
-      screenshots_path: "./fastlane/screenshots",
-      skip_screenshots: !Dir.exist?("./fastlane/screenshots/en-US"),
+      metadata_path: "#{FASTLANE_DIR}/metadata",
+      screenshots_path: "#{FASTLANE_DIR}/screenshots",
+      skip_screenshots: !Dir.exist?("#{FASTLANE_DIR}/screenshots/en-US"),
       overwrite_screenshots: true,
+      force: true, # no interactive HTML preview confirmation on CI
       skip_binary_upload: false,
       submit_for_review: options[:submit] == "true",
       automatic_release: false,
