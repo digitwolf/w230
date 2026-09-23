@@ -12,6 +12,10 @@ Ride-verified on a 2024 W230. Firmware in Rust (ESP-IDF), with the protocol
 and estimation logic unit-tested on the host against frames captured from the
 real ECU.
 
+**Owner? Start with the [end-to-end owner's guide](docs/owner-guide.md)**:
+parts, wiring, the one-time flash, first rides, the app, updates and
+troubleshooting in one place.
+
 ## Why
 
 The W230's cluster has no gear digit. The ECU has no gear register either (a
@@ -111,14 +115,21 @@ bands, which is the whole post-ride debugging ritual.
 ```
 firmware/          Cargo workspace (Rust, ESP-IDF)
   core/            w230-core: protocol framing, gear estimation, learning,
-                   display rendering. No ESP dependencies, host-tested.
+                   display rendering, BLE wire formats, OTA manifest rules.
+                   No ESP dependencies, host-tested.
   esp32/           w230-gear-indicator: UART transport, fast init, NVS,
-                   WiFi dashboard (compile-gated), poll loop.
+                   BLE GATT server, WiFi + HTTPS OTA with rollback, poll loop.
+  scripts/         flash.sh (USB, OTA layout), make-image.sh, release.sh
+ios/               W230 Gear iPhone app (SwiftUI); builds from Linux with xtool
+infra/             CloudFormation for the S3 + CloudFront update endpoint
 docs/
+  owner-guide.md       end-to-end guide for W230 owners
   hardware.md          parts, wiring, power, the neutral-diode rule
   kds-protocol.md      wire-level ECU protocol, every byte a real capture
   bringup-learnings.md what was verified, what was disproven, architecture
   toolchain.md         toolchain setup, flashing, debugging
+  ble-protocol.md      the GATT service the app uses
+  ota.md               update pipeline, verification, rollback
 ```
 
 ## Status and open items
@@ -129,10 +140,10 @@ Working and ride-verified. Things still on the list:
   tallies printed at boot) is temporary diagnostics and can be stripped.
 - Throttle-position register hunt, which would enable load-aware shift hints.
 - Shift hints from RPM and gear (digit colour), designed but not built.
-- A compile-gated WiFi dashboard (`W230-GEAR` / `w230diag`,
-  http://192.168.71.1/) exists for live status, histogram CSV and
-  calibration wipe. It is off by default because WiFi interrupts glitch the
-  WS2812 timing.
+- The legacy compile-gated WiFi dashboard (`WIFI_DIAG`) is superseded by
+  the app and can be removed.
+- iOS app: TestFlight and App Store delivery are automated
+  (`ios/README.md`); Android is not planned.
 
 ## Other Kawasakis
 
