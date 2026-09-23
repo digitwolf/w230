@@ -100,6 +100,7 @@ struct DashboardView: View {
                 .chartXScale(domain: 40.0...240.0)
                 .chartYAxis(.hidden)
                 .frame(height: 70)
+                .padding(.top, 14) // room for the gear-number annotations above the bands
                 Text(String(format: "rpm ÷ km/h = %.1f  (bands ±14 %%)", Double(live.ratio)))
                     .font(.caption).foregroundStyle(.secondary)
             } else {
