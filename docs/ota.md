@@ -40,6 +40,31 @@ with this firmware (0.2.0+) — NVS keeps its offset, calibration survives.
 Failures show a red cross for a few seconds and the reason in the app's
 Update tab (`ota-status.error`) and event log.
 
+## Verified on hardware (2026-09-22)
+
+0.2.0 → 0.2.1 → 0.2.2 over the air from the app: manifest fetched over
+CloudFront, ~1.8 MB image downloaded in ~20 s, descriptor and SHA-256
+verified, slot switched, reboot into the other slot with the otadata
+entry in `PENDING_VERIFY` ("rollback armed" in the boot log), boot-time
+check correctly skipped while pending, and the entry set to `VALID` by
+the self-test 20 s later. The boot log prints the raw otadata entries at
+those three points (`OTA: otadata …`) so this can be re-checked after any
+change.
+
+## Memory during an update
+
+The ESP32 runs BLE, the WiFi station and a TLS session at once only during
+a download; that is the tightest heap moment (~110 KiB free after boot,
+~70 KiB after the WiFi driver, TLS needs ~30–45 KiB). One 0.2.1 download
+aborted on a 4 KiB allocation and tripped the task watchdog during the
+whole-slot erase. Fixes in 0.2.3: `CONFIG_MBEDTLS_DYNAMIC_BUFFER` +
+`CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA`, smaller WiFi buffer pools,
+`OTA_WITH_SEQUENTIAL_WRITES` (sector-by-sector erase, no multi-second
+stall), a stack download buffer, and a 40 KiB free-heap guard that fails
+the attempt with a message instead of aborting. The WiFi driver exists
+only from the first request until 90 s after the last (`WIFI: driver
+created/released` in the log shows the heap cost).
+
 ## Partition layout (`firmware/partitions.csv`, 4 MB)
 
 | Name | Offset | Size |
@@ -55,7 +80,9 @@ The 0.2.0 image is ~1.77 MB of the 1.97 MB slot; watch this in
 
 `scripts/flash.sh` (the cargo runner) flashes the **ESP-IDF-built
 bootloader** (rollback support compiled in; espflash's bundled one lacks it)
-plus this CSV. A plain `espflash flash <elf>` would use a single-app table
+plus this CSV, and erases the `otadata` partition: on a board coming from
+the old single-app layout that region still holds image bytes, and the
+first over-the-air update then boots without a valid rollback state. A plain `espflash flash <elf>` would use a single-app table
 and the firmware would report `otaCapable:false`.
 
 ## Releasing

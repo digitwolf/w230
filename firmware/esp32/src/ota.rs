@@ -37,6 +37,7 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::http::client::{Configuration as HttpConfig, EspHttpConnection};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::ota::{EspFirmwareInfoLoad, EspOta, FirmwareInfo, SlotState};
+use esp_idf_svc::sys;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use log::{info, warn};
 use sha2::{Digest, Sha256};
@@ -56,6 +57,75 @@ const CHUNK: usize = 4096;
 /// Bytes needed before the embedded app descriptor can be inspected
 /// (image header 24 + segment header 8 + esp_app_desc_t 256).
 const APP_DESC_END: usize = 24 + 8 + 256;
+/// Free heap required before a download is attempted: TLS session +
+/// HTTP buffers + OTA bookkeeping. Below this the attempt fails with a
+/// clear message instead of an allocation abort mid-stream.
+const MIN_FREE_HEAP_FOR_DOWNLOAD: u32 = 40 * 1024;
+
+/// Streaming writer over the raw `esp_ota_*` API. Unlike the binding's
+/// `initiate_update`, it uses `OTA_WITH_SEQUENTIAL_WRITES`: each flash
+/// sector is erased just before it is written, so there is no multi-second
+/// whole-slot erase up front (which starved CPU 0's idle task and tripped
+/// the task watchdog while the radio stack waited).
+struct SlotWriter {
+    handle: sys::esp_ota_handle_t,
+    partition: *const sys::esp_partition_t,
+    open: bool,
+}
+
+impl SlotWriter {
+    fn begin() -> anyhow::Result<Self> {
+        // SAFETY: esp_ota_get_next_update_partition returns a pointer into the
+        // static partition table (or null, which esp_ota_begin rejects);
+        // `handle` is an out-parameter the call initialises on success.
+        let partition = unsafe { sys::esp_ota_get_next_update_partition(core::ptr::null()) };
+        let mut handle: sys::esp_ota_handle_t = 0;
+        sys::esp!(unsafe {
+            sys::esp_ota_begin(
+                partition,
+                sys::OTA_WITH_SEQUENTIAL_WRITES as usize,
+                &mut handle,
+            )
+        })
+        .map_err(|e| anyhow::anyhow!("esp_ota_begin: {e}"))?;
+        Ok(Self {
+            handle,
+            partition,
+            open: true,
+        })
+    }
+
+    fn write(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+        // SAFETY: the handle is open (checked by `open`) and the pointer/len
+        // pair describes a live slice for the duration of the call.
+        sys::esp!(unsafe {
+            sys::esp_ota_write(self.handle, chunk.as_ptr() as *const _, chunk.len())
+        })
+        .map_err(|e| anyhow::anyhow!("esp_ota_write: {e}"))
+    }
+
+    /// Validate the written image (`esp_ota_end`) and make it the boot slot.
+    fn finish_and_activate(mut self) -> anyhow::Result<()> {
+        self.open = false;
+        // SAFETY: the handle came from esp_ota_begin and is ended exactly once.
+        sys::esp!(unsafe { sys::esp_ota_end(self.handle) })
+            .map_err(|e| anyhow::anyhow!("esp_ota_end (image invalid?): {e}"))?;
+        // SAFETY: `partition` is the pointer esp_ota_begin accepted.
+        sys::esp!(unsafe { sys::esp_ota_set_boot_partition(self.partition) })
+            .map_err(|e| anyhow::anyhow!("esp_ota_set_boot_partition: {e}"))
+    }
+}
+
+impl Drop for SlotWriter {
+    /// Abort an unfinished update so a failed download never leaves the OTA
+    /// handle (and its allocation) dangling.
+    fn drop(&mut self) {
+        if self.open {
+            // SAFETY: handle is open and not yet ended.
+            unsafe { sys::esp_ota_abort(self.handle) };
+        }
+    }
+}
 
 pub enum OtaRequest {
     /// Fetch the manifest; optionally go straight on to install.
@@ -593,9 +663,20 @@ impl Worker {
             sh.ota.progress = pct;
             sh.changed = true;
         };
-        let mut update = self.ota.initiate_update()?;
+        let free = platform::free_heap();
+        if free < MIN_FREE_HEAP_FOR_DOWNLOAD {
+            anyhow::bail!(
+                "only {} KiB heap free, need {} KiB — disconnect the app and retry",
+                free / 1024,
+                MIN_FREE_HEAP_FOR_DOWNLOAD / 1024
+            );
+        }
+        info!("OTA: {} KiB heap free at download start", free / 1024);
+        let mut update = SlotWriter::begin()?;
         let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; CHUNK];
+        // Stack, not heap: the worker thread has 20 KiB and the heap is the
+        // scarce resource here.
+        let mut buf = [0u8; CHUNK];
         let mut head: Vec<u8> = Vec::with_capacity(APP_DESC_END);
         let mut head_checked = false;
         let mut total: u32 = 0;
@@ -647,7 +728,7 @@ impl Worker {
             Ok(())
         })();
         if let Err(e) = result {
-            let _ = update.abort();
+            drop(update); // aborts the handle
             return Err(e);
         }
         {
@@ -656,8 +737,7 @@ impl Worker {
             sh.changed = true;
         }
         // esp_ota_end: image header/segment/hash validation on the slot.
-        let finished = update.finish()?;
-        finished.activate()?;
+        update.finish_and_activate()?;
         info!("OTA: otadata after activate {}", platform::otadata_dump());
         drop(shared);
         self.last_wifi_use = Instant::now();

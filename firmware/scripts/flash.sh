@@ -19,7 +19,11 @@ fi
 port_args=()
 if [[ -n "${ESPFLASH_PORT:-}" ]]; then port_args=(--port "$ESPFLASH_PORT"); fi
 # 115200: the ATOM's USB bridge times out at higher rates.
+# --erase-parts otadata: a board coming from the old single-app layout has
+# stale image bytes where the OTA data now lives; the first over-the-air
+# update then boots without a valid rollback state.
 exec espflash flash "${port_args[@]}" \
   --bootloader "$bootloader" \
   --partition-table "$here/partitions.csv" \
+  --erase-parts otadata \
   --monitor "$@" "$elf"
