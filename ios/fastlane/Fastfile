@@ -55,6 +55,7 @@ platform :ios do
               "-authenticationKeyIssuerID #{ENV.fetch('ASC_ISSUER_ID')}",
       export_options: {
         signingStyle: "automatic",
+        teamID: "L6WP9AN4NS",
         uploadSymbols: true
       }
     )
