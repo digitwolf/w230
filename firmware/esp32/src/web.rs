@@ -78,8 +78,7 @@ pub fn start(
         server.fn_handler("/hist.csv", Method::Get, move |req| {
             let s = shared.lock().unwrap().clone();
             let csv = hist_csv(&s.hist);
-            let mut resp =
-                req.into_response(200, Some("OK"), &[("Content-Type", "text/csv")])?;
+            let mut resp = req.into_response(200, Some("OK"), &[("Content-Type", "text/csv")])?;
             resp.write(csv.as_bytes())?;
             Ok::<(), anyhow::Error>(())
         })?;

@@ -1,6 +1,6 @@
-# 07 — Toolchain setup: building, debugging, deploying to the ESP32
+# Toolchain setup: building, debugging, deploying to the ESP32
 
-From-scratch setup for working on `firmware-rs/` (M5Stack ATOM Matrix,
+From-scratch setup for working on `firmware/` (M5Stack ATOM Matrix,
 ESP32-PICO-D4, Xtensa). Everything here was exercised on Linux; the gotchas
 called out are ones that actually cost time on this project.
 
@@ -62,7 +62,7 @@ Symptom if missing: the ESP-IDF tool-install step aborts with
 ## 3. Building
 
 ```sh
-cd firmware-rs
+cd firmware
 . ~/export-esp.sh
 export LD_LIBRARY_PATH="$HOME/.local/lib/compat:$LD_LIBRARY_PATH"
 cargo build --release
@@ -71,8 +71,8 @@ cargo build --release
 - Target `xtensa-esp32-espidf` and the `ldproxy` linker come from
   `.cargo/config.toml`; nothing to pass manually.
 - The **first build downloads and compiles ESP-IDF v5.3.3** into
-  `firmware-rs/.embuild/` — slow and multi-gigabyte, once per checkout.
-- Workspace layout: `cargo build` builds the flashable `firmware/` crate
+  `firmware/.embuild/` — slow and multi-gigabyte, once per checkout.
+- Workspace layout: `cargo build` builds the flashable `esp32/` crate
   (default member); `core/` is the pure-logic crate.
 - Do **not** enable `esp-idf-svc`'s embassy features unless the code gains an
   embassy executor — without an executor arch the link fails with
@@ -141,10 +141,10 @@ timeout 15 espflash monitor --port /dev/ttyUSB0 --non-interactive | grep -E 'LEA
 'GEAR:'                 estimator state transitions
 'NEUTRAL PIN'           raw G23 transitions
 'acknowledged|session'  link bring-up
-'no reply|short echo|held low|init failed'   link faults (see docs/06 §6)
+'no reply|short echo|held low|init failed'   link faults (see kds-protocol.md §6)
 ```
 
-### Compile-gated diagnostics (`firmware/src/main.rs`)
+### Compile-gated diagnostics (`esp32/src/main.rs`)
 | Const | Purpose |
 |---|---|
 | `WIFI_DIAG` | softAP `W230-GEAR`/`w230diag`, dashboard at http://192.168.71.1/ (live JSON, histogram CSV, calibration wipe). Off by default — WiFi is the WS2812 glitch source and costs CPU/power |
@@ -167,4 +167,4 @@ timeout 15 espflash monitor --port /dev/ttyUSB0 --non-interactive | grep -E 'LEA
 | `No such file or directory` on `/dev/ttyUSB0` | cable is charge-only / unplugged; check `lsusb` for the M5Stack bridge |
 | `Device or resource busy` | another espflash holds the port: `pkill -x espflash` |
 | Board "loses" calibration after a ride | it doesn't — check the black-box tallies for which gate rejected samples |
-| K-line dead | walk the signature table in `docs/06` §6 |
+| K-line dead | walk the signature table in [kds-protocol.md §6](kds-protocol.md) |

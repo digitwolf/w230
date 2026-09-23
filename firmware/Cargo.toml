@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["core", "firmware"]
+members = ["core", "esp32"]
 
-# `cargo build` from this directory builds the flashable firmware; the pure
+# `cargo build` from this directory builds the flashable firmware (`esp32/`); the pure
 # logic in `core` is host-testable via `cargo test-host` (see .cargo/config.toml).
-default-members = ["firmware"]
+default-members = ["esp32"]
 
 [profile.release]
 opt-level = "s"

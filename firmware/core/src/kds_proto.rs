@@ -275,7 +275,10 @@ mod tests {
     fn all_zeros_is_held_low() {
         // Exactly what an unpowered transceiver produced on the bench.
         let mut r = reader(&[0x00, 0x00, 0x00, 0x00, 0x00]);
-        assert!(matches!(parse_response(&mut r), Err(ParseError::HeldLow(_))));
+        assert!(matches!(
+            parse_response(&mut r),
+            Err(ParseError::HeldLow(_))
+        ));
     }
 
     #[test]

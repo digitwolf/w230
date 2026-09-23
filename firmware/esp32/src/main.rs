@@ -93,7 +93,11 @@ fn neutral_tick(
     }
     info!(
         "NEUTRAL PIN: {}",
-        if neutral_low { "LOW (neutral)" } else { "HIGH (in gear)" }
+        if neutral_low {
+            "LOW (neutral)"
+        } else {
+            "HIGH (in gear)"
+        }
     );
     *neutral_was = neutral_low;
     let gear = estimator.update(&GearInputs {
@@ -410,7 +414,14 @@ fn main() -> anyhow::Result<()> {
         // Neutral: the G23 switch wire only (LOW = neutral).
         let pin_low = neutral.is_low();
         if pin_low != neutral_was_active {
-            info!("NEUTRAL PIN: {}", if pin_low { "LOW (neutral)" } else { "HIGH (in gear)" });
+            info!(
+                "NEUTRAL PIN: {}",
+                if pin_low {
+                    "LOW (neutral)"
+                } else {
+                    "HIGH (in gear)"
+                }
+            );
             neutral_was_active = pin_low;
         }
         let neutral_active = pin_low;
@@ -451,7 +462,10 @@ fn main() -> anyhow::Result<()> {
 
         // Publish to the WiFi dashboard; act on a requested calibration wipe.
         if let Some(webdiag) = &webdiag {
-            if webdiag.clear_req.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if webdiag
+                .clear_req
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
                 learner.clear();
                 estimator.clear_bands();
                 info!("LEARN: calibration wiped (web request)");

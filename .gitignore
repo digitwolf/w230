@@ -1,0 +1,7 @@
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Build outputs live under firmware/ (see firmware/.gitignore)
