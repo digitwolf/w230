@@ -20,7 +20,7 @@ on:
 
 jobs:
   deliver:
-    runs-on: macos-15
+    runs-on: macos-26 # Apple requires builds with the current (iOS 26) SDK
     defaults:
       run:
         working-directory: ios
@@ -38,6 +38,10 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
           working-directory: ios
+      - name: select newest Xcode
+        run: |
+          x=$(ls -d /Applications/Xcode*.app | sort -V | tail -1); echo "$x"
+          sudo xcode-select -s "$x" && xcodebuild -version
       - name: xcodegen
         run: brew install xcodegen
       - name: fastlane

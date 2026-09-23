@@ -43,6 +43,16 @@ struct ScanView: View {
                 } header: {
                     Text("Nearby indicators")
                 } footer: {
+                    Text("No indicator yet? The demo shows every screen with sample data from a real ride.")
+                }
+                Section {
+                    Button {
+                        session.startDemo()
+                        dismiss()
+                    } label: {
+                        Label("Try the demo", systemImage: "play.circle")
+                    }
+                } footer: {
                     Text("The first command you send asks iOS to pair with the indicator. Accept the pairing request — commands and WiFi credentials only travel over the encrypted link.")
                 }
             }

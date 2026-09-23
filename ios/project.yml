@@ -28,10 +28,11 @@ targets:
         CFBundleDisplayName: W230 Gear
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: >-
           W230 Gear connects to the gear indicator on your motorcycle over
           Bluetooth to show diagnostics, calibrate it and install firmware updates.
-        UIBackgroundModes: [bluetooth-central]
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:

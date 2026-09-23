@@ -1,0 +1,26 @@
+name: iOS screenshots
+
+# Push a `shots-*` tag; download the artifact and commit it under
+# ios/fastlane/screenshots so the release lane uploads it.
+on:
+  push:
+    tags: ["shots-*"]
+
+jobs:
+  screenshots:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+      - name: select newest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)" && xcodebuild -version
+      - name: xcodegen
+        run: brew install xcodegen
+      - name: capture
+        run: scripts/screenshots.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: ios/fastlane/screenshots

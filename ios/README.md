@@ -80,6 +80,17 @@ Then:
   review. Screenshots are not automated: upload them once in App Store
   Connect (6.9" and 6.5" iPhone sets).
 
+Publishing checklist (what the `release` lane uploads vs. what stays manual):
+- Uploaded by the lane: binary, `fastlane/metadata` (description, keywords,
+  URLs, review contact + notes, category), screenshots from
+  `fastlane/screenshots/en-US` (generate with a `shots-*` tag, download the
+  workflow artifact, commit), and the privacy "no data collected" answer.
+- Manual, once, in App Store Connect: age rating questionnaire (all "None"),
+  pricing (Free) and availability, and the review contact phone number
+  (`fastlane/metadata/review_information/phone_number.txt` is empty).
+- The demo mode (Connect sheet → "Try the demo", or launch argument `-demo`)
+  is what reviewers use; `-tab N` preselects a tab for screenshots.
+
 Review notes worth pasting into App Store Connect: the app needs the W230
 indicator hardware (guideline 2.1), so attach a short video of the app
 connected to the bike and point to the GitHub project. Bluetooth usage

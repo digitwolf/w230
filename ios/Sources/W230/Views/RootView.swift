@@ -2,19 +2,20 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(DeviceSession.self) private var session
+    @StateObject private var nav = RootNavigation()
 
     var body: some View {
-        TabView {
+        TabView(selection: $nav.tab) {
             NavigationStack { DashboardView() }
-                .tabItem { Label("Gear", systemImage: "gauge.with.dots.needle.67percent") }
+                .tabItem { Label("Gear", systemImage: "gauge.with.dots.needle.67percent") }.tag(0)
             NavigationStack { DiagnosticsView() }
-                .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+                .tabItem { Label("Diagnostics", systemImage: "stethoscope") }.tag(1)
             NavigationStack { CalibrationView() }
-                .tabItem { Label("Calibration", systemImage: "chart.bar.xaxis") }
+                .tabItem { Label("Calibration", systemImage: "chart.bar.xaxis") }.tag(2)
             NavigationStack { TroubleshootView() }
-                .tabItem { Label("Troubleshoot", systemImage: "wrench.and.screwdriver") }
+                .tabItem { Label("Troubleshoot", systemImage: "wrench.and.screwdriver") }.tag(3)
             NavigationStack { UpdateView() }
-                .tabItem { Label("Update", systemImage: "arrow.down.circle") }
+                .tabItem { Label("Update", systemImage: "arrow.down.circle") }.tag(4)
         }
         .overlay(alignment: .top) {
             if let banner = session.compatibility?.banner {
@@ -25,6 +26,20 @@ struct RootView: View {
                     .background(.yellow.opacity(0.9))
                     .foregroundStyle(.black)
             }
+        }
+    }
+}
+
+/// Selected tab; `-tab N` on launch preselects one (screenshot automation).
+@MainActor final class RootNavigation: ObservableObject {
+    @Published var tab: Int
+
+    init() {
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-tab"), i + 1 < args.count, let n = Int(args[i + 1]) {
+            tab = n
+        } else {
+            tab = 0
         }
     }
 }
