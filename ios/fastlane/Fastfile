@@ -65,14 +65,12 @@ platform :ios do
   # Register the bundle ID and create the App Store Connect app record on
   # first run (idempotent afterwards).
   private_lane :ensure_app_record do
+    api_key # produce reads the key from the lane context, not a parameter
     produce(
-      api_key: api_key,
       app_identifier: "com.digitwolf.w230",
       app_name: "W230 Gear",
-      app_version: get_version_number(xcodeproj: PROJECT, target: SCHEME),
       language: "en-US",
       sku: "w230-gear",
-      enable_services: {},
       skip_itc: false
     )
   end
