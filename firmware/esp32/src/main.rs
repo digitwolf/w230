@@ -757,7 +757,10 @@ fn main() -> anyhow::Result<()> {
                 };
                 b.notify(Attr::Live, &live.encode());
             }
-            if b.connections() > 0 && last_slow_publish.elapsed() >= BLE_SLOW_PUBLISH {
+            // Refreshed even with no phone connected (cheap: only rewritten on
+            // change) so the first read after a connect never sees an empty
+            // attribute.
+            if last_slow_publish.elapsed() >= BLE_SLOW_PUBLISH {
                 last_slow_publish = Instant::now();
                 let cfg = config.lock().unwrap();
                 let (slot, pending, _) = boot_slot_info.clone().unwrap_or_default();

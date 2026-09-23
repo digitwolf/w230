@@ -1,3 +1,4 @@
 version: 1
 bundleID: com.digitwolf.w230
 infoPath: Info.plist
+iconPath: AppIcon.png

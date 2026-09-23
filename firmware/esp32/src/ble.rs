@@ -24,10 +24,10 @@ use esp_idf_hal::modem::BluetoothModem;
 use esp_idf_svc::bt::ble::gap::{
     AdvConfiguration, AuthenticationRequest, BleGapEvent, EspBleGap, IOCapabilities, KeyMask,
 };
-use esp_idf_svc::bt::ble::gatt::server::{ConnectionId, EspGatts, GattsEvent};
+use esp_idf_svc::bt::ble::gatt::server::{ConnectionId, EspGatts, GattsEvent, TransferId};
 use esp_idf_svc::bt::ble::gatt::{
-    AutoResponse, GattCharacteristic, GattDescriptor, GattId, GattInterface, GattServiceId,
-    GattStatus, Handle, Permission, Property,
+    AutoResponse, GattCharacteristic, GattDescriptor, GattId, GattInterface, GattResponse,
+    GattServiceId, GattStatus, Handle, Permission, Property,
 };
 use esp_idf_svc::bt::{BdAddr, Ble as BleMode, BtDriver, BtStatus, BtUuid};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
@@ -208,6 +208,16 @@ struct State {
     ready: bool,
     adv_parts_configured: u8,
     connections: Vec<Connection>,
+}
+
+#[derive(Clone, Copy)]
+struct WriteReq {
+    gatt_if: GattInterface,
+    conn_id: ConnectionId,
+    trans_id: TransferId,
+    handle: Handle,
+    offset: u16,
+    need_rsp: bool,
 }
 
 struct Inner {
@@ -400,14 +410,8 @@ impl Inner {
             BleGapEvent::AuthenticationComplete { bd_addr, status } => {
                 info!("BLE: pairing with {bd_addr}: {status:?}");
             }
-            BleGapEvent::AdvertisingStopped(_) => {
-                // Bluedroid stops advertising on connect; keep the door open
-                // for a second phone while under the connection cap.
-                let n = self.state.lock().unwrap().connections.len();
-                if n < MAX_CONNECTIONS && n > 0 {
-                    let _ = self.gap.start_advertising();
-                }
-            }
+            // Advertising stops on connect and restarts on disconnect; one
+            // phone at a time keeps the radio schedule simple.
             _ => {}
         }
         Ok(())
@@ -497,9 +501,12 @@ impl Inner {
                 };
                 info!("BLE: {addr} connected (accepted={accepted})");
                 if accepted {
-                    // 30–50 ms interval: 4 Hz telemetry with margin, and inside
-                    // Apple's accessory guidelines (≥15 ms, multiple of 15).
-                    self.gap.set_conn_params_conf(addr, 24, 40, 0, 400)?;
+                    // Arguments are MILLISECONDS (esp-idf-svc converts to BLE
+                    // units). 30–45 ms interval = 4 Hz telemetry with margin
+                    // and inside Apple's guidelines (multiples of 15 ms);
+                    // 4 s supervision timeout. (A 400 ms timeout here once
+                    // dropped every link within seconds of connecting.)
+                    self.gap.set_conn_params_conf(addr, 30, 45, 0, 4000)?;
                 }
             }
             GattsEvent::PeerDisconnected { addr, reason, .. } => {
@@ -514,12 +521,56 @@ impl Inner {
             // attribute value; ExecWrite below reads the result.
             GattsEvent::Write {
                 conn_id,
+                trans_id,
                 handle,
                 offset,
+                need_rsp,
                 is_prep: false,
                 value,
                 ..
-            } => self.on_write(conn_id, handle, offset, value),
+            } => self.on_write(
+                &WriteReq {
+                    gatt_if,
+                    conn_id,
+                    trans_id,
+                    handle,
+                    offset,
+                    need_rsp,
+                },
+                value,
+            ),
+            // The CCCD descriptors are added without auto-response, so reads
+            // of them must be answered here or the phone's ATT queue stalls
+            // (every later request waits behind it until a 30 s timeout).
+            GattsEvent::Read {
+                conn_id,
+                trans_id,
+                handle,
+                need_rsp: true,
+                ..
+            } => {
+                let st = self.state.lock().unwrap();
+                if let Some(i) = st.cccd.iter().position(|h| *h == Some(handle)) {
+                    let subscribed = st
+                        .connections
+                        .iter()
+                        .find(|c| c.conn_id == conn_id)
+                        .map(|c| c.subscribed & (1 << i) != 0)
+                        .unwrap_or(false);
+                    drop(st);
+                    let mut rsp = GattResponse::new();
+                    rsp.attr_handle(handle)
+                        .value(&[u8::from(subscribed), 0])
+                        .map_err(|_| EspError::from_infallible::<ESP_FAIL>())?;
+                    self.gatts.send_response(
+                        gatt_if,
+                        conn_id,
+                        trans_id,
+                        GattStatus::Ok,
+                        Some(&rsp),
+                    )?;
+                }
+            }
             GattsEvent::ExecWrite {
                 canceled: false, ..
             } => {
@@ -617,7 +668,17 @@ impl Inner {
         }
     }
 
-    fn on_write(&self, conn_id: ConnectionId, handle: Handle, offset: u16, value: &[u8]) {
+    /// Write requests are bundled in a struct: keep argument lists short on
+    /// this toolchain (see ota::spawn for the 6-word miscompile).
+    fn on_write(&self, req: &WriteReq, value: &[u8]) {
+        let WriteReq {
+            gatt_if,
+            conn_id,
+            trans_id,
+            handle,
+            offset,
+            need_rsp,
+        } = *req;
         let mut st = self.state.lock().unwrap();
         if let Some(i) = st.cccd.iter().position(|h| *h == Some(handle)) {
             if offset == 0 && value.len() == 2 {
@@ -633,6 +694,16 @@ impl Inner {
                         CHARS[i].attr_name(),
                         if on { "on" } else { "off" }
                     );
+                }
+            }
+            drop(st);
+            // Descriptors have no auto-response: acknowledge the write ourselves.
+            if need_rsp {
+                if let Err(e) =
+                    self.gatts
+                        .send_response(gatt_if, conn_id, trans_id, GattStatus::Ok, None)
+                {
+                    warn!("BLE: CCCD write response failed: {e:?}");
                 }
             }
             return;

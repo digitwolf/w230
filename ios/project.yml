@@ -20,6 +20,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources/W230
+      - path: Assets.xcassets
     info:
       path: Info.plist
       properties:
@@ -34,4 +35,5 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.digitwolf.w230
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true

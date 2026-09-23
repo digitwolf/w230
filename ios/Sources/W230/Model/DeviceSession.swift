@@ -60,7 +60,15 @@ final class DeviceSession {
             self.ble.setNotify(W230Protocol.live, true)
             self.ble.setNotify(W230Protocol.otaStatus, true)
             self.ble.setNotify(W230Protocol.wifiStatus, true)
-            Task { await self.refreshAll() }
+            Task {
+                await self.refreshAll()
+                // The firmware fills its JSON attributes once a second; a read
+                // in the first moments after connecting can come back empty.
+                if self.deviceInfo == nil, self.isConnected {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    await self.refreshAll()
+                }
+            }
         }
         ble.onNotification = { [weak self] uuid, data in
             guard let self else { return }
@@ -122,6 +130,7 @@ final class DeviceSession {
         for uuid in uuids where ble.hasCharacteristic(uuid) {
             do {
                 let data = try await ble.read(uuid)
+                if data.isEmpty { continue } // attribute not filled yet; keep the last value
                 switch uuid {
                 case W230Protocol.deviceInfo:
                     let info = try decoder.decode(DeviceInfo.self, from: data)
